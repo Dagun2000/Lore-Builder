@@ -1,4 +1,4 @@
-"""Storage layer shell for the lore reviewer.
+"""Storage layer shell for Lore Builder.
 
 Phase 0 scope only: dynamic table creation from the schema registry and
 plain CRUD against SQLite, plus a thin wrapper around a local persistent

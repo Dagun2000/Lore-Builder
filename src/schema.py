@@ -1,4 +1,4 @@
-"""Schema registry loader for the lore reviewer.
+"""Schema registry loader for Lore Builder.
 
 Parses schema_registry.yaml and status_effects.yaml into plain
 Python dict/list structures and exposes small lookup helpers on top.
