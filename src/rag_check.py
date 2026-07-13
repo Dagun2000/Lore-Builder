@@ -83,6 +83,10 @@ def check_rule_violation(raw_text: str, context_docs: list) -> Judgment | None:
         "새로 입력된 사건 문장이 이 규칙을 위반하는지 판단하라.\n\n"
         f"세계관 규칙/문서:\n{docs}\n\n"
         f"사건 문장: {raw_text}\n\n"
+        "규칙이 특정 전제조건(도구, 자격, 재료 등)을 요구하는데, 사건 문장에 그 전제조건이 "
+        "충족되었다는 언급이 전혀 없다면 — 굳이 결여를 명시하지 않았더라도 — 위반 가능성이 "
+        "있는 것으로 판단하라. 규칙이 금지하는 행위 자체가 문장에 등장하면 전제조건 충족 여부를 "
+        "확인할 길이 없는 이상 위반 쪽으로 판단하는 것이 기본값이다.\n\n"
         "규칙을 위반할 가능성이 있으면:\n"
         '{"violation": true, "reason": "위반이라고 판단한 근거", "confidence": 0.0에서 1.0 사이 숫자}\n'
         "위반 가능성이 없으면:\n"
@@ -203,11 +207,13 @@ def check_status_consistency(entity_id: str, raw_text: str) -> Judgment | None:
 def run_rag_checks(entities: list, raw_text: str) -> list:
     judgments = []
 
-    context_docs = retrieve_context(entities, raw_text)
+    # check_rule_violation gets ONLY the canonical hard-rule texts, not the
+    # generic similarity-search context_docs — mixing in unrelated retrieved
+    # documents was observed to dilute the prompt enough that an actual
+    # violation went undetected. retrieve_context() stays available as a
+    # general-purpose utility, just not fed into this specific check.
     hard_rule_docs = _get_hard_rule_texts()
-    combined_docs = list(dict.fromkeys(context_docs + hard_rule_docs))
-
-    rule_judgment = check_rule_violation(raw_text, combined_docs)
+    rule_judgment = check_rule_violation(raw_text, hard_rule_docs)
     if rule_judgment is not None:
         judgments.append(rule_judgment)
 

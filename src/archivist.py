@@ -34,7 +34,7 @@ def _slugify(text: str) -> str:
     text = text.strip()
     text = re.sub(r"\s+", "_", text)
     text = re.sub(r"[^\w]", "", text)
-    return text[:30] or "entry"
+    return text[:60] or "entry"
 
 
 def generate_id(category: str, seed_text: str, existing_ids: set) -> str:

@@ -57,6 +57,10 @@ def infer_category(tag: str, context_sentence: str) -> str:
         f"태그: {tag}\n"
         f"문맥 문장: {context_sentence}\n\n"
         f"카테고리 목록:\n{description_lines}\n\n"
+        "태그가 한국어에서 일반명사와 동음이의어인 고유명사일 수 있다(예: '미라'는 사람 "
+        "이름이면서 동시에 '미라(mummy)'라는 일반명사이기도 하다). 문맥 문장에서 태그가 "
+        "주어로서 행동을 하는 주체로 등장하면(예: '~가/이 ~했다') character로 분류하고, "
+        "단순히 명사를 사전적 의미로 언급하는 경우에만 다른 카테고리를 고려하라.\n\n"
         f"다음 중 정확히 하나만 답하라: {', '.join(_VALID_CATEGORIES)}\n"
         "카테고리 이름만 출력하고 다른 설명은 하지 마라."
     )
@@ -232,7 +236,7 @@ def _create_new_entity(category: str, tag: str, context_sentence: str, year: int
 
     storage.save_entity(category, entity_id, fields)
     storage.save_to_chroma(entity_id, context_sentence, {"category": category, "tag": tag})
-    print(f"[{tag}]를 신규 {category} 엔티티 {entity_id}로 저장했습니다.")
+    print(f"[{tag}]을(를) 신규 {category} 엔티티 {entity_id}로 저장했습니다.")
     return entity_id
 
 
@@ -242,7 +246,7 @@ def resolve_entity(tag: str, context_sentence: str, year: int) -> str:
 
     if len(matches) == 1:
         entity_id = matches[0]
-        print(f"[{tag}]를 {entity_id}로 인식했습니다.")
+        print(f"[{tag}]을(를) {entity_id}로 인식했습니다.")
         return entity_id
 
     if len(matches) > 1:
