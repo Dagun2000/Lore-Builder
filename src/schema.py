@@ -51,6 +51,22 @@ def get_required_fields(category: str) -> list:
     return [f for f in get_fields(category) if f.get("required")]
 
 
+def coerce_value(field_def: dict, raw_value: str):
+    """Parse a raw CLI string into the Python type a field's schema `type`
+    expects. Shared by mapping.py's new-entity field review and
+    detail_panel.py's existing-entity field editor."""
+    if not raw_value:
+        return None
+    field_type = field_def["type"]
+    if field_type == "integer":
+        return int(raw_value)
+    if field_type == "boolean":
+        return raw_value.strip().lower() in ("true", "1", "예", "y", "yes")
+    if field_type == "list":
+        return [v.strip() for v in raw_value.split(",") if v.strip()]
+    return raw_value
+
+
 def category_from_id(entity_id: str) -> str | None:
     """Reverse-match an entity id (e.g. char_jang) to its category via id_prefix."""
     registry = load_schema_registry()

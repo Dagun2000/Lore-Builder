@@ -1,6 +1,9 @@
 character:
   id_prefix: char_
   fields:
+    - name: name
+      type: text
+      required: true
     - name: birth_year
       type: integer
       required: false
@@ -33,6 +36,9 @@ character:
 race:
   id_prefix: race_
   fields:
+    - name: name
+      type: text
+      required: true
     - name: lifespan
       type: integer
       required: false
@@ -46,6 +52,9 @@ race:
 location:
   id_prefix: loc_
   fields:
+    - name: name
+      type: text
+      required: true
     - name: category
       type: enum
       options: [kingdom, city, ruins, wilderness, dungeon, tavern]
@@ -72,6 +81,9 @@ location:
 faction:
   id_prefix: faction_
   fields:
+    - name: name
+      type: text
+      required: true
     - name: category
       type: enum
       options: [mercenary_guild, kingdom, religious_order, tribe]
@@ -98,6 +110,9 @@ faction:
 artifact:
   id_prefix: item_
   fields:
+    - name: name
+      type: text
+      required: true
     - name: current_owner
       type: reference
       ref_category: character

@@ -134,34 +134,62 @@ def entity_exists(category: str, entity_id: str) -> bool:
     return get_entity(category, entity_id) is not None
 
 
-def get_event_years(entity_id: str) -> list:
-    """Years of timeline records related to entity_id, via:
+def find_related_timeline_ids(entity_id: str) -> list:
+    """Timeline ids related to entity_id, via:
     - timeline.location referencing entity_id directly
     - relationship rows where entity_id is subject/object and the other
       side is a timeline event (event_ prefix)
-    """
+    Shared traversal used by get_event_years (Phase 0) and
+    field_update.find_related_context (Phase 6) — extend here, not in
+    either caller, so the two never drift apart."""
     conn = get_connection()
     init_db(conn)
 
-    years = set()
+    seen = set()
+    ids = []
 
     for row in conn.execute(
-        'SELECT year FROM "timeline" WHERE location = ?', (entity_id,)
+        'SELECT id FROM "timeline" WHERE location = ?', (entity_id,)
     ):
-        if row["year"] is not None:
-            years.add(row["year"])
+        if row["id"] not in seen:
+            seen.add(row["id"])
+            ids.append(row["id"])
 
     for row in conn.execute(
         'SELECT subject, object FROM "relationship" WHERE subject = ? OR object = ?',
         (entity_id, entity_id),
     ):
         other = row["object"] if row["subject"] == entity_id else row["subject"]
-        if other and other.startswith("event_"):
+        if other and other.startswith("event_") and other not in seen:
             event_row = conn.execute(
-                'SELECT year FROM "timeline" WHERE id = ?', (other,)
+                'SELECT id FROM "timeline" WHERE id = ?', (other,)
             ).fetchone()
-            if event_row and event_row["year"] is not None:
-                years.add(event_row["year"])
+            if event_row:
+                seen.add(event_row["id"])
+                ids.append(event_row["id"])
+
+    conn.close()
+    return ids
+
+
+def get_event_years(entity_id: str) -> list:
+    """Years of every timeline record related to entity_id (see
+    find_related_timeline_ids for how "related" is determined)."""
+    ids = find_related_timeline_ids(entity_id)
+    if not ids:
+        return []
+
+    conn = get_connection()
+    init_db(conn)
+
+    placeholders = ", ".join("?" for _ in ids)
+    years = {
+        row["year"]
+        for row in conn.execute(
+            f'SELECT year FROM "timeline" WHERE id IN ({placeholders})', ids
+        )
+        if row["year"] is not None
+    }
 
     conn.close()
     return sorted(years)
@@ -212,6 +240,13 @@ def save_to_chroma(entity_id: str, text_body: str, metadata: dict) -> None:
     collection.upsert(ids=[entity_id], documents=[text_body], metadatas=[metadata])
 
 
-def query_chroma(query_text: str, top_k: int = 3) -> dict:
+def query_chroma(query_text: str, top_k: int = 3, ids: list | None = None) -> dict:
+    """`ids`, when given, restricts the similarity search to that subset of
+    documents instead of the whole collection — used by Phase 6's
+    find_related_context to *rank* a fixed candidate pool rather than
+    open a fresh whole-collection search."""
     collection = get_chroma_collection()
-    return collection.query(query_texts=[query_text], n_results=top_k)
+    kwargs = {"query_texts": [query_text], "n_results": top_k}
+    if ids:
+        kwargs["ids"] = ids
+    return collection.query(**kwargs)

@@ -45,7 +45,9 @@ def _patch_prompts(monkeypatch, responder):
 
 
 def test_new_character_death_event_saves_normally(monkeypatch):
-    responder = _script(("사망", "예"), ("승인하시겠습니까", "y"))
+    # "기본값" matches the name prompt ('이름 (기본값: "가론", ...)'); empty
+    # accepts the tag itself as the name.
+    responder = _script(("기본값", ""), ("사망", "예"), ("승인하시겠습니까", "y"))
     _patch_prompts(monkeypatch, responder)
 
     result = main.run_pipeline("2200년, [가론]이 몬스터와 싸우다가 죽었다.")
@@ -54,6 +56,7 @@ def test_new_character_death_event_saves_normally(monkeypatch):
     entity_id = result["resolved_entities"]["가론"]
     assert entity_id.startswith("char_")
     entity = storage.get_entity("character", entity_id)
+    assert entity["name"] == "가론"
     assert entity["death_year"] == 2200
 
 
@@ -67,6 +70,7 @@ def test_already_dead_character_reappearing_is_rejected(monkeypatch):
         "character",
         "char_e2e_deadman",
         {
+            "name": "달튼",
             "birth_year": 2000,
             "death_year": 2100,
             "notes": "달튼은 2100년에 사망한 것으로 기록된 인물이다.",
@@ -92,6 +96,7 @@ def test_death_year_out_of_order_with_existing_events_is_rejected(monkeypatch):
         "character",
         "char_e2e_reverse",
         {
+            "name": "카심",
             "birth_year": 2000,
             "death_year": 2150,
             "notes": "카심은 시간 순서가 꼬인 기록으로 유명한 인물이다.",
@@ -130,6 +135,7 @@ def test_lifespan_warning_accept_sets_ack_and_suppresses_future_popup(monkeypatc
         "character",
         "char_e2e_longlived",
         {
+            "name": "브란",
             "birth_year": 2000,
             "race": "race_e2e_short",
             "notes": "브란은 수명 논란이 있는 인물이다.",
@@ -157,7 +163,11 @@ def test_lifespan_warning_computed_from_event_years_only(monkeypatch):
     storage.save_entity(
         "character",
         "char_e2e_nodates",
-        {"race": "race_e2e_short2", "notes": "가웨인은 생몰년이 기록되지 않은 인물이다."},
+        {
+            "name": "가웨인",
+            "race": "race_e2e_short2",
+            "notes": "가웨인은 생몰년이 기록되지 않은 인물이다.",
+        },
     )
     storage.save_entity("timeline", "event_e2e_nodates_a", {"year": 2000})
     storage.save_entity(
@@ -185,6 +195,7 @@ def test_destroyed_artifact_reappearing_is_rejected(monkeypatch):
         "artifact",
         "item_e2e_relic",
         {
+            "name": "이렐릭",
             "current_status": "destroyed",
             "destroyed_year": 2100,
             "notes": "이렐릭은 2100년에 파괴된 것으로 기록된 유물이다.",
@@ -210,6 +221,7 @@ def test_escape_clears_imprisoned_status_automatically(monkeypatch):
         "character",
         "char_e2e_prisoner",
         {
+            "name": "가일",
             "birth_year": 2000,
             "active_status_effects": ["imprisoned"],
             "notes": "가일은 용병 출신의 인물이다.",
@@ -237,6 +249,7 @@ def test_imprisoned_character_fighting_raises_conflict_popup(monkeypatch):
         "character",
         "char_e2e_prisoner2",
         {
+            "name": "테오",
             "birth_year": 2000,
             "active_status_effects": ["imprisoned"],
             "notes": "테오는 용병 출신의 인물이다.",

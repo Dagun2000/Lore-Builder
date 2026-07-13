@@ -42,22 +42,28 @@ def test_resolve_entity_creates_character_without_death_year_when_user_declines(
     def fake_llm(prompt):
         return "character" if "카테고리" in prompt else "yes"
 
+    def fake_prompt(message):
+        if "기본값" in message:
+            return ""  # accept the tag as the name
+        return "아니오"
+
     monkeypatch.setattr(mapping, "_invoke_llm", fake_llm)
-    monkeypatch.setattr(mapping, "_prompt", lambda message: "아니오")
+    monkeypatch.setattr(mapping, "_prompt", fake_prompt)
 
     entity_id = mapping.resolve_entity("리나", "리나가 칼에 찔려 죽었다.", 2200)
 
     assert entity_id.startswith("char_")
     entity = storage.get_entity("character", entity_id)
     assert entity is not None
+    assert entity["name"] == "리나"
     assert entity["death_year"] is None
 
 
 def test_create_new_entity_forces_required_field_before_saving(monkeypatch):
-    # faction.category is required: true. First response is an empty Enter,
-    # which must be rejected (not accepted as "skip") before a real value is
-    # taken.
-    responses = iter(["", "kingdom", ""])
+    # faction.name is prompted first (Enter accepts the tag as name), then
+    # faction.category is required: true — an empty Enter there must be
+    # rejected (not accepted as "skip") before a real value is taken.
+    responses = iter(["", "", "kingdom", ""])
     monkeypatch.setattr(mapping, "_prompt", lambda message: next(responses))
 
     entity_id = mapping._create_new_entity(
@@ -66,6 +72,7 @@ def test_create_new_entity_forces_required_field_before_saving(monkeypatch):
 
     entity = storage.get_entity("faction", entity_id)
     assert entity is not None
+    assert entity["name"] == "철혈단"
     assert entity["category"] == "kingdom"
 
 
@@ -83,7 +90,9 @@ def test_collect_fields_rejects_clearing_a_required_field(monkeypatch):
     monkeypatch.setattr(mapping, "_prompt", lambda message: next(responses))
 
     fields = mapping._collect_fields(
-        "faction", preset={"category": "kingdom"}, allow_optional_review=True
+        "faction",
+        preset={"name": "테스트조직", "category": "kingdom"},
+        allow_optional_review=True,
     )
 
     assert fields["category"] == "mercenary_guild"

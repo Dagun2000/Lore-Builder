@@ -76,13 +76,22 @@ def infer_category(tag: str, context_sentence: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 2-2. Existing entity matching (rule-based string match)
+# 2-2. Existing entity matching (rule-based string match on the `name` field)
 # ---------------------------------------------------------------------------
 
 def find_existing_matches(tag: str, category: str) -> list:
+    """Match against the category's `name` field only — notes/appearance are
+    descriptive prose, not identifiers, and matching against them meant a tag
+    only worked if it happened to appear verbatim in some sentence (e.g.
+    char_mira went unmatched until "미라" was literally written into her
+    notes). Categories with no `name` field (relationship/timeline/system)
+    are never tag-matchable and always return []."""
+    field_names = {f["name"] for f in schema.get_fields(category)}
+    if "name" not in field_names or not tag:
+        return []
+
     conn = storage.get_connection()
     storage.init_db(conn)
-    text_fields = [f["name"] for f in schema.get_fields(category) if f["type"] == "text"]
     rows = conn.execute(f'SELECT * FROM "{category}"').fetchall()
     conn.close()
 
@@ -90,16 +99,14 @@ def find_existing_matches(tag: str, category: str) -> list:
     partial_matches = []
 
     for row in rows:
-        entity_id = row["id"]
-        id_suffix = entity_id.split("_", 1)[1] if "_" in entity_id else entity_id
-
-        if tag == id_suffix:
-            exact_matches.append(entity_id)
+        name = row["name"]
+        if not name:
             continue
 
-        haystack = " ".join(str(row[name]) for name in text_fields if row[name])
-        if tag and tag in haystack:
-            partial_matches.append(entity_id)
+        if tag == name:
+            exact_matches.append(row["id"])
+        elif tag in name or name in tag:
+            partial_matches.append(row["id"])
 
     return exact_matches if exact_matches else partial_matches
 
@@ -119,6 +126,13 @@ def infer_terminal_status(context_sentence: str) -> bool:
     return raw.startswith("y")
 
 
+def _prompt_name(tag: str) -> str:
+    answer = _prompt(
+        f'이름 (기본값: "{tag}", Enter로 그대로 사용, 다른 값 입력 시 변경): '
+    ).strip()
+    return answer if answer else tag
+
+
 def _generate_entity_id(category: str, tag: str) -> str:
     prefix = schema.load_schema_registry()[category]["id_prefix"]
     slug = re.sub(r"\s+", "_", tag.strip())
@@ -130,19 +144,6 @@ def _generate_entity_id(category: str, tag: str) -> str:
         suffix += 1
         entity_id = f"{candidate}_{suffix}"
     return entity_id
-
-
-def _coerce_value(field_def: dict, raw_value: str):
-    if not raw_value:
-        return None
-    field_type = field_def["type"]
-    if field_type == "integer":
-        return int(raw_value)
-    if field_type == "boolean":
-        return raw_value.strip().lower() in ("true", "1", "예", "y", "yes")
-    if field_type == "list":
-        return [v.strip() for v in raw_value.split(",") if v.strip()]
-    return raw_value
 
 
 def _collect_fields(
@@ -171,7 +172,7 @@ def _collect_fields(
         while True:
             value = _prompt(f"{field_def['name']} 값 입력 (필수): ").strip()
             if value:
-                fields[field_def["name"]] = _coerce_value(field_def, value)
+                fields[field_def["name"]] = schema.coerce_value(field_def, value)
                 break
             print("필수 필드는 비워둘 수 없습니다.")
 
@@ -190,7 +191,7 @@ def _collect_fields(
         if field_def.get("required") and not value:
             print(f"'{field_def['name']}'은(는) 필수 필드라 비워둘 수 없습니다.")
             continue
-        fields[field_def["name"]] = _coerce_value(field_def, value)
+        fields[field_def["name"]] = schema.coerce_value(field_def, value)
 
     return fields
 
@@ -208,8 +209,12 @@ def _select_from_candidates(tag: str, matches: list) -> str:
 
 
 def _create_new_entity(category: str, tag: str, context_sentence: str, year: int) -> str:
-    entity_id = _generate_entity_id(category, tag)
     fields = {}
+    field_names = {f["name"] for f in schema.get_fields(category)}
+    if "name" in field_names:
+        fields["name"] = _prompt_name(tag)
+
+    entity_id = _generate_entity_id(category, fields.get("name", tag))
     allow_optional_review = True
 
     required_fields = schema.get_required_fields(category)
@@ -230,8 +235,8 @@ def _create_new_entity(category: str, tag: str, context_sentence: str, year: int
         # "수정" -> falls through to full field review below.
 
     # Always routed through _collect_fields (not skipped) so required fields
-    # on non-character categories can never be silently left empty; character
-    # has no required fields, so the fast path above is unaffected.
+    # on non-character categories can never be silently left empty; name is
+    # already satisfied above, so this only prompts for whatever's still missing.
     fields = _collect_fields(category, preset=fields, allow_optional_review=allow_optional_review)
 
     storage.save_entity(category, entity_id, fields)

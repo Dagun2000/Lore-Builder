@@ -141,9 +141,13 @@ def run_pipeline(user_input: str) -> dict:
 
 
 def cli_loop() -> None:
-    _print("Lore Reviewer CLI. 종료하려면 '종료'를 입력하세요.")
+    _print("Lore Builder CLI. 종료하려면 '종료'를 입력하세요.")
     while True:
-        user_input = _prompt("\n입력> ").strip()
+        try:
+            user_input = _prompt("\n입력> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            _print("\n종료합니다.")
+            break
         if user_input == "종료":
             _print("종료합니다.")
             break
