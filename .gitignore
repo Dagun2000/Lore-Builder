@@ -1,0 +1,8 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+lore_reviewer/db/lore.db
+lore_reviewer/chroma_store/

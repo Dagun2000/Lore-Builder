@@ -1,0 +1,168 @@
+character:
+  id_prefix: char_
+  fields:
+    - name: birth_year
+      type: integer
+      required: false
+      role: lifecycle_start
+    - name: death_year
+      type: integer
+      required: false
+      role: lifecycle_end
+    - name: race
+      type: reference
+      ref_category: race
+      required: false
+    - name: faction
+      type: reference
+      ref_category: faction
+      required: false
+    - name: appearance
+      type: text
+      required: false
+    - name: notes
+      type: text
+      required: false
+    - name: lifespan_check_ack
+      type: boolean
+      required: false
+
+race:
+  id_prefix: race_
+  fields:
+    - name: lifespan
+      type: integer
+      required: false
+    - name: weaknesses
+      type: list
+      required: false
+    - name: notes
+      type: text
+      required: false
+
+location:
+  id_prefix: loc_
+  fields:
+    - name: category
+      type: enum
+      options: [kingdom, city, ruins, wilderness, dungeon, tavern]
+      required: true
+    - name: controlling_faction
+      type: reference
+      ref_category: faction
+      required: false
+    - name: founded_year
+      type: integer
+      required: false
+      role: lifecycle_start
+    - name: destroyed_year
+      type: integer
+      required: false
+      role: lifecycle_end
+    - name: notes
+      type: text
+      required: false
+
+faction:
+  id_prefix: faction_
+  fields:
+    - name: category
+      type: enum
+      options: [mercenary_guild, kingdom, religious_order, tribe]
+      required: true
+    - name: territory
+      type: reference
+      ref_category: location
+      required: false
+    - name: founded_year
+      type: integer
+      required: false
+      role: lifecycle_start
+    - name: disbanded_year
+      type: integer
+      required: false
+      role: lifecycle_end
+    - name: notes
+      type: text
+      required: false
+
+artifact:
+  id_prefix: item_
+  fields:
+    - name: current_owner
+      type: reference
+      ref_category: character
+      required: false
+      role: ownership
+    - name: current_status
+      type: enum
+      options: [possessed, lost, destroyed, unknown]
+      required: true
+    - name: origin_event
+      type: reference
+      ref_category: timeline
+      required: false
+    - name: destroyed_year
+      type: integer
+      required: false
+      role: lifecycle_end
+    - name: notes
+      type: text
+      required: false
+
+timeline:
+  id_prefix: event_
+  fields:
+    - name: year
+      type: integer
+      required: true
+      role: timeline_point
+    - name: location
+      type: reference
+      ref_category: location
+      required: false
+    - name: status_effect
+      type: reference
+      ref_category: status_effect
+      required: false
+    - name: notes
+      type: text
+      required: false
+
+relationship:
+  id_prefix: rel_
+  fields:
+    - name: subject
+      type: reference
+      ref_category: any
+      required: true
+    - name: predicate
+      type: text
+      required: true
+    - name: object
+      type: reference
+      ref_category: any
+      required: true
+    - name: since
+      type: integer
+      required: false
+    - name: until
+      type: integer
+      required: false
+    - name: notes
+      type: text
+      required: false
+
+system:
+  id_prefix: system_
+  fields:
+    - name: domain
+      type: enum
+      options: [magic, divine, artifact_law, physics]
+      required: true
+    - name: hard_rule
+      type: boolean
+      required: true
+    - name: notes
+      type: text
+      required: false
