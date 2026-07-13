@@ -11,7 +11,7 @@ from pathlib import Path
 
 import chromadb
 
-from .schema import load_schema_registry
+from .schema import category_from_id, load_schema_registry
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "db" / "lore.db"
@@ -168,43 +168,24 @@ def get_event_years(entity_id: str) -> list:
 
 
 def get_status_effects(entity_id: str) -> list:
-    """Status effect ids from timeline events linked to entity_id, via the
-    same direct-location / relationship matching as get_event_years. There is
-    no explicit "resolved" flag yet, so every linked status_effect is treated
-    as currently active — Phase 3's rag_check reasons about clearing/conflict
-    from raw_text, it doesn't persist a resolution here."""
-    conn = get_connection()
-    init_db(conn)
+    """Current active status_effect ids for entity_id.
 
-    effects = []
+    This reads the entity's `active_status_effects` snapshot field — the
+    single source of truth for "what status is active now", kept in sync by
+    archivist.build_diff's update ChangeItems (Phase 4). Do not reintroduce a
+    timeline/relationship history scan here: relationships are an
+    append-only log with no "resolved" flag, so a scan can never tell a
+    cleared status from an active one and would drift from what was
+    actually saved."""
+    category = category_from_id(entity_id)
+    if category is None:
+        return []
 
-    for row in conn.execute(
-        'SELECT status_effect FROM "timeline" WHERE location = ?', (entity_id,)
-    ):
-        if row["status_effect"]:
-            effects.append(row["status_effect"])
+    entity = get_entity(category, entity_id)
+    if entity is None:
+        return []
 
-    for row in conn.execute(
-        'SELECT subject, object FROM "relationship" WHERE subject = ? OR object = ?',
-        (entity_id, entity_id),
-    ):
-        other = row["object"] if row["subject"] == entity_id else row["subject"]
-        if other and other.startswith("event_"):
-            event_row = conn.execute(
-                'SELECT status_effect FROM "timeline" WHERE id = ?', (other,)
-            ).fetchone()
-            if event_row and event_row["status_effect"]:
-                effects.append(event_row["status_effect"])
-
-    conn.close()
-
-    seen = set()
-    unique_effects = []
-    for effect in effects:
-        if effect not in seen:
-            seen.add(effect)
-            unique_effects.append(effect)
-    return unique_effects
+    return list(entity.get("active_status_effects") or [])
 
 
 # ---------------------------------------------------------------------------
