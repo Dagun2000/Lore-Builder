@@ -167,6 +167,46 @@ def get_event_years(entity_id: str) -> list:
     return sorted(years)
 
 
+def get_status_effects(entity_id: str) -> list:
+    """Status effect ids from timeline events linked to entity_id, via the
+    same direct-location / relationship matching as get_event_years. There is
+    no explicit "resolved" flag yet, so every linked status_effect is treated
+    as currently active — Phase 3's rag_check reasons about clearing/conflict
+    from raw_text, it doesn't persist a resolution here."""
+    conn = get_connection()
+    init_db(conn)
+
+    effects = []
+
+    for row in conn.execute(
+        'SELECT status_effect FROM "timeline" WHERE location = ?', (entity_id,)
+    ):
+        if row["status_effect"]:
+            effects.append(row["status_effect"])
+
+    for row in conn.execute(
+        'SELECT subject, object FROM "relationship" WHERE subject = ? OR object = ?',
+        (entity_id, entity_id),
+    ):
+        other = row["object"] if row["subject"] == entity_id else row["subject"]
+        if other and other.startswith("event_"):
+            event_row = conn.execute(
+                'SELECT status_effect FROM "timeline" WHERE id = ?', (other,)
+            ).fetchone()
+            if event_row and event_row["status_effect"]:
+                effects.append(event_row["status_effect"])
+
+    conn.close()
+
+    seen = set()
+    unique_effects = []
+    for effect in effects:
+        if effect not in seen:
+            seen.add(effect)
+            unique_effects.append(effect)
+    return unique_effects
+
+
 # ---------------------------------------------------------------------------
 # Chroma
 # ---------------------------------------------------------------------------

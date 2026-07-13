@@ -1,13 +1,4 @@
-import pytest
-
 from src import schema, storage
-from scripts.seed_db import seed
-
-
-@pytest.fixture(scope="session", autouse=True)
-def seeded_db():
-    """Seed data is required by the get_event_years test; upserts make this idempotent."""
-    seed()
 
 
 def test_schema_registry_lifecycle_end_field():
@@ -55,4 +46,6 @@ def test_chroma_save_and_query():
 
 
 def test_get_event_years_for_char_jang():
-    assert storage.get_event_years("char_jang") == [2080]
+    # 2085 is event_jang_imprisoned, added as Phase 3 seed data (unresolved
+    # "imprisoned" status used by the status-consistency tests).
+    assert storage.get_event_years("char_jang") == [2080, 2085]

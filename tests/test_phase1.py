@@ -1,0 +1,177 @@
+from src import hard_check, storage
+
+
+def _link_event(character_id: str, event_id: str, year: int) -> None:
+    storage.save_entity("timeline", event_id, {"year": year})
+    storage.save_entity(
+        "relationship",
+        f"rel_{character_id}_{event_id}",
+        {"subject": character_id, "predicate": "involved_in", "object": event_id},
+    )
+
+
+def test_terminal_check_passes_when_no_death_year():
+    storage.save_entity("character", "char_t1_alive", {"birth_year": 2000})
+    _link_event("char_t1_alive", "event_t1_a", 2050)
+
+    assert hard_check.check_terminal_violation("character", "char_t1_alive") is None
+
+
+def test_terminal_check_blocks_event_after_death():
+    storage.save_entity(
+        "character", "char_t2_dead", {"birth_year": 2000, "death_year": 2100}
+    )
+    _link_event("char_t2_dead", "event_t2_a", 2150)
+
+    conflict = hard_check.check_terminal_violation("character", "char_t2_dead")
+
+    assert conflict is not None
+    assert conflict.check_type == "terminal"
+    assert conflict.severity == "blocking"
+
+
+def test_terminal_check_blocks_when_death_year_set_before_existing_max_event():
+    storage.save_entity("character", "char_t3_dead", {"birth_year": 2000})
+    _link_event("char_t3_dead", "event_t3_a", 2100)
+    _link_event("char_t3_dead", "event_t3_b", 2200)
+
+    storage.save_entity("character", "char_t3_dead", {"death_year": 2150})
+
+    conflict = hard_check.check_terminal_violation("character", "char_t3_dead")
+
+    assert conflict is not None
+    assert conflict.severity == "blocking"
+
+
+def test_lifespan_check_warns_with_birth_and_death_year():
+    storage.save_entity("race", "race_t4_short", {"lifespan": 100})
+    storage.save_entity(
+        "character",
+        "char_t4_long",
+        {"birth_year": 2000, "death_year": 2300, "race": "race_t4_short"},
+    )
+
+    conflict = hard_check.check_lifespan_violation("char_t4_long")
+
+    assert conflict is not None
+    assert conflict.severity == "warning"
+    assert "300" in conflict.reason
+
+
+def test_lifespan_check_uses_event_years_when_death_year_missing():
+    storage.save_entity("race", "race_t5_short", {"lifespan": 100})
+    storage.save_entity(
+        "character",
+        "char_t5_long",
+        {"birth_year": 2000, "race": "race_t5_short"},
+    )
+    _link_event("char_t5_long", "event_t5_a", 3000)
+
+    conflict = hard_check.check_lifespan_violation("char_t5_long")
+
+    assert conflict is not None
+    assert conflict.severity == "warning"
+    assert "1000" in conflict.reason
+
+
+def test_lifespan_check_skipped_when_ack_true():
+    storage.save_entity("race", "race_t6_short", {"lifespan": 100})
+    storage.save_entity(
+        "character",
+        "char_t6_long",
+        {"birth_year": 2000, "race": "race_t6_short"},
+    )
+    _link_event("char_t6_long", "event_t6_a", 3000)
+
+    assert hard_check.check_lifespan_violation("char_t6_long") is not None
+
+    storage.save_entity("character", "char_t6_long", {"lifespan_check_ack": True})
+
+    assert hard_check.check_lifespan_violation("char_t6_long") is None
+
+
+def test_lifespan_check_skips_when_race_or_lifespan_missing():
+    storage.save_entity(
+        "character", "char_t7_norace", {"birth_year": 2000, "death_year": 3000}
+    )
+    assert hard_check.check_lifespan_violation("char_t7_norace") is None
+
+    storage.save_entity("race", "race_t7_unknown", {"lifespan": None})
+    storage.save_entity(
+        "character",
+        "char_t7_unknownrace",
+        {"birth_year": 2000, "death_year": 3000, "race": "race_t7_unknown"},
+    )
+    assert hard_check.check_lifespan_violation("char_t7_unknownrace") is None
+
+
+def test_terminal_check_catches_artifact_reappearing_after_destroyed_year():
+    """artifact only has lifecycle_end (destroyed_year), no lifecycle_start field at all."""
+    storage.save_entity(
+        "artifact",
+        "item_t8_relic",
+        {"current_status": "destroyed", "destroyed_year": 2100},
+    )
+    storage.save_entity("timeline", "event_t8_reappear", {"year": 2150})
+    storage.save_entity(
+        "relationship",
+        "rel_item_t8_relic_event_t8_reappear",
+        {
+            "subject": "item_t8_relic",
+            "predicate": "appeared_in",
+            "object": "event_t8_reappear",
+        },
+    )
+
+    conflict = hard_check.check_terminal_violation("artifact", "item_t8_relic")
+
+    assert conflict is not None
+    assert conflict.severity == "blocking"
+
+
+def test_run_hard_checks_on_artifact_only_runs_terminal_check():
+    storage.save_entity(
+        "artifact",
+        "item_t9_relic",
+        {"current_status": "destroyed", "destroyed_year": 2100},
+    )
+    storage.save_entity("timeline", "event_t9_reappear", {"year": 2150})
+    storage.save_entity(
+        "relationship",
+        "rel_item_t9_relic_event_t9_reappear",
+        {
+            "subject": "item_t9_relic",
+            "predicate": "appeared_in",
+            "object": "event_t9_reappear",
+        },
+    )
+
+    conflicts = hard_check.run_hard_checks("artifact", "item_t9_relic")
+
+    assert len(conflicts) == 1
+    assert conflicts[0].check_type == "terminal"
+    assert conflicts[0].severity == "blocking"
+
+
+def test_run_hard_checks_on_location_does_not_crash_and_skips_lifespan():
+    storage.save_entity(
+        "location",
+        "loc_t10_ruin",
+        {"category": "ruins", "founded_year": 1000, "destroyed_year": 1200},
+    )
+    storage.save_entity(
+        "timeline", "event_t10_late", {"year": 1300, "location": "loc_t10_ruin"}
+    )
+
+    conflicts = hard_check.run_hard_checks("location", "loc_t10_ruin")
+
+    assert len(conflicts) == 1
+    assert conflicts[0].check_type == "terminal"
+
+
+def test_run_hard_checks_on_faction_returns_empty_when_no_violations():
+    storage.save_entity(
+        "faction", "faction_t11_calm", {"category": "kingdom", "founded_year": 1000}
+    )
+
+    assert hard_check.run_hard_checks("faction", "faction_t11_calm") == []
