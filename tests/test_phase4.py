@@ -1,81 +1,102 @@
-"""Phase 4 uses hand-built (not mocked) InferredEvent/Judgment instances —
-no LLM calls happen in archivist.py, so plain dataclass instances are enough.
+"""Phase 4 (rewritten for Phase 10's event-centric redesign) uses hand-built
+(not mocked) InferredEvent instances — no LLM calls happen in archivist.py,
+so plain dataclass instances are enough.
 """
 
 from src import archivist, storage
 from src.inference import InferredEvent
 from src.parser import ParsedInput
-from src.rag_check import Judgment
 
 
-def test_build_diff_creates_timeline_and_relationship():
+def test_build_diff_point_event_adds_pointers_to_every_involved_entity():
     parsed = ParsedInput(
-        year=2100,
+        years=[2100],
         tags=["쟝", "검은 산양 여관"],
         raw_text="쟝이 검은 산양 여관에서 얻어맞았다.",
     )
     resolved = {"쟝": "char_jang", "검은 산양 여관": "loc_black_goat_inn"}
     inferred = InferredEvent(
+        event_type="point",
         event_summary="쟝이 검은 산양 여관에서 얻어맞았다.",
-        relationships=[
-            {
-                "subject": "char_jang",
-                "predicate": "얻어맞음_장소",
-                "object": "loc_black_goat_inn",
-            }
-        ],
-        status_effect=None,
+        involved_entities=["char_jang", "loc_black_goat_inn"],
     )
 
-    diff = archivist.build_diff(parsed, resolved, inferred, [])
+    diff = archivist.build_diff(parsed, resolved, inferred)
 
     timeline_creates = [c for c in diff if c.category == "timeline" and c.action == "create"]
-    relationship_creates = [
-        c for c in diff if c.category == "relationship" and c.action == "create"
-    ]
+    pointer_updates = {c.entity_id: c for c in diff if c.action == "update"}
 
     assert len(timeline_creates) == 1
     assert timeline_creates[0].fields["year"] == 2100
     assert timeline_creates[0].fields["location"] == "loc_black_goat_inn"
+    timeline_id = timeline_creates[0].entity_id
 
-    assert len(relationship_creates) == 1
-    assert relationship_creates[0].fields["subject"] == "char_jang"
-    assert relationship_creates[0].fields["object"] == "loc_black_goat_inn"
+    assert "char_jang" in pointer_updates
+    assert timeline_id in pointer_updates["char_jang"].fields["event_ids"]
+    assert "loc_black_goat_inn" in pointer_updates
+    assert timeline_id in pointer_updates["loc_black_goat_inn"].fields["event_ids"]
 
 
-def test_build_diff_status_clear_produces_character_update():
-    parsed = ParsedInput(
-        year=2100, tags=["쟝"], raw_text="쟝이 탈출해서 마을로 도망쳤다."
+def test_build_diff_duration_clear_updates_the_open_record_not_a_new_one():
+    storage.save_entity("character", "char_p4_prisoner", {"name": "감금자"})
+    storage.save_entity(
+        "timeline",
+        "event_p4_open_status",
+        {
+            "entity": "char_p4_prisoner",
+            "predicate": "imprisoned",
+            "target": None,
+            "start_year": 2050,
+            "end_year": None,
+            "notes": "감금자가 2050년부터 수감 상태다.",
+        },
     )
-    resolved = {"쟝": "char_jang"}
+    storage.add_event_pointer("char_p4_prisoner", "event_p4_open_status")
+
+    parsed = ParsedInput(years=[2100], tags=["감금자"], raw_text="감금자가 탈출했다.")
+    resolved = {"감금자": "char_p4_prisoner"}
     inferred = InferredEvent(
-        event_summary="쟝이 수감 상태에서 탈출했다.",
-        relationships=[],
-        status_effect={"entity": "char_jang", "effect": "imprisoned", "action": "clear"},
+        event_type="duration",
+        duration_effect={
+            "entity": "char_p4_prisoner",
+            "predicate": "imprisoned",
+            "target": None,
+            "action": "clear",
+            "start_year": None,
+            "end_year": None,
+        },
     )
-    judgment = Judgment(
-        type="clears_status",
-        reason="쟝이 탈출했다는 문장은 수감 상태 해제를 의미함",
-        entity_id="char_jang",
-        status_effect_id="imprisoned",
+
+    diff = archivist.build_diff(parsed, resolved, inferred)
+
+    assert len(diff) == 1
+    assert diff[0].action == "update"
+    assert diff[0].category == "timeline"
+    assert diff[0].entity_id == "event_p4_open_status"
+    assert diff[0].fields == {"end_year": 2100}
+
+
+def test_build_diff_duration_clear_with_no_open_record_returns_confirmation_needed():
+    storage.save_entity("character", "char_p4_never_imprisoned", {"name": "자유인"})
+
+    parsed = ParsedInput(years=[2100], tags=["자유인"], raw_text="자유인이 풀려났다.")
+    resolved = {"자유인": "char_p4_never_imprisoned"}
+    inferred = InferredEvent(
+        event_type="duration",
+        duration_effect={
+            "entity": "char_p4_never_imprisoned",
+            "predicate": "imprisoned",
+            "target": None,
+            "action": "clear",
+            "start_year": None,
+            "end_year": None,
+        },
     )
 
-    diff = archivist.build_diff(parsed, resolved, inferred, [judgment])
+    result = archivist.build_diff(parsed, resolved, inferred)
 
-    timeline_creates = [c for c in diff if c.category == "timeline" and c.action == "create"]
-    character_updates = [c for c in diff if c.category == "character" and c.action == "update"]
-
-    assert len(timeline_creates) == 1
-    assert timeline_creates[0].fields["status_effect"] is None  # clearing, not setting
-
-    assert len(character_updates) == 1
-    assert character_updates[0].entity_id == "char_jang"
-    open_statuses = [
-        r["status"]
-        for r in character_updates[0].fields["active_status_effects"]
-        if r.get("end_year") is None
-    ]
-    assert "imprisoned" not in open_statuses
+    assert isinstance(result, archivist.ConfirmationNeeded)
+    assert result.reason
 
 
 def test_generate_id_avoids_collision():
@@ -89,52 +110,83 @@ def test_generate_id_avoids_collision():
     assert second == f"{first}_2"
 
 
-def test_relationships_are_always_create_never_update():
-    parsed = ParsedInput(
-        year=2100, tags=["쟝"], raw_text="쟝이 탈출해서 마을로 도망쳤다."
-    )
+def test_duration_set_always_creates_new_timeline_record():
+    parsed = ParsedInput(years=[2100], tags=["쟝"], raw_text="쟝이 은빛도시와 적대하게 됐다.")
     resolved = {"쟝": "char_jang"}
     inferred = InferredEvent(
-        event_summary="쟝이 수감 상태에서 탈출했다.",
-        relationships=[
-            {"subject": "char_jang", "predicate": "탈출함", "object": "char_jang"}
-        ],
-        status_effect={"entity": "char_jang", "effect": "imprisoned", "action": "clear"},
+        event_type="duration",
+        duration_effect={
+            "entity": "char_jang",
+            "predicate": "hostile_with",
+            "target": "loc_silver_city",
+            "action": "set",
+            "start_year": 2100,
+            "end_year": None,
+        },
     )
 
-    diff = archivist.build_diff(parsed, resolved, inferred, [])
+    diff = archivist.build_diff(parsed, resolved, inferred)
 
-    relationship_items = [c for c in diff if c.category == "relationship"]
+    timeline_items = [c for c in diff if c.category == "timeline"]
+    assert timeline_items
+    assert all(c.action == "create" for c in timeline_items)
 
-    assert relationship_items
-    assert all(c.action == "create" for c in relationship_items)
 
-
-def test_applied_status_update_is_immediately_visible_via_get_status_effects():
-    # Regression guard: get_status_effects must read the same
-    # active_status_effects field archivist writes to, not a separate
-    # timeline/relationship history scan — otherwise a saved diff can look
-    # like it silently didn't take effect.
-    assert "imprisoned" in storage.get_status_effects("char_jang")
-
+def test_is_single_event_false_returns_confirmation_needed():
     parsed = ParsedInput(
-        year=2100, tags=["쟝"], raw_text="쟝이 탈출해서 마을로 도망쳤다."
+        years=[2080, 2200], tags=["쟝", "랄프"], raw_text="쟝이 2080년에 술을 마셨고, 랄프가 2200년에 죽었다."
     )
-    resolved = {"쟝": "char_jang"}
     inferred = InferredEvent(
-        event_summary="쟝이 수감 상태에서 탈출했다.",
-        relationships=[],
-        status_effect={"entity": "char_jang", "effect": "imprisoned", "action": "clear"},
+        event_type="point",
+        is_single_event=False,
+        ambiguity_reason="서로 다른 두 사건이 한 문장에 섞여 있습니다.",
     )
 
-    diff = archivist.build_diff(parsed, resolved, inferred, [])
-    character_update = next(
-        c for c in diff if c.category == "character" and c.action == "update"
+    result = archivist.build_diff(parsed, {"쟝": "char_jang", "랄프": "char_ralph"}, inferred)
+
+    assert isinstance(result, archivist.ConfirmationNeeded)
+    assert result.reason == "서로 다른 두 사건이 한 문장에 섞여 있습니다."
+
+
+def test_applied_duration_clear_is_immediately_visible_via_get_current_state():
+    # Regression guard: get_current_state must read the same event_ids the
+    # archivist's update ChangeItem targets, not a separate snapshot field —
+    # otherwise a saved diff can look like it silently didn't take effect.
+    storage.save_entity("character", "char_p4_prisoner2", {"name": "감금자2"})
+    storage.save_entity(
+        "timeline",
+        "event_p4_open_status2",
+        {
+            "entity": "char_p4_prisoner2",
+            "predicate": "imprisoned",
+            "target": None,
+            "start_year": 2050,
+            "end_year": None,
+            "notes": "감금자2가 2050년부터 수감 상태다.",
+        },
     )
+    storage.add_event_pointer("char_p4_prisoner2", "event_p4_open_status2")
+
+    assert storage.get_current_state("char_p4_prisoner2", "imprisoned")
+
+    parsed = ParsedInput(years=[2100], tags=["감금자2"], raw_text="감금자2가 탈출했다.")
+    resolved = {"감금자2": "char_p4_prisoner2"}
+    inferred = InferredEvent(
+        event_type="duration",
+        duration_effect={
+            "entity": "char_p4_prisoner2",
+            "predicate": "imprisoned",
+            "target": None,
+            "action": "clear",
+            "start_year": None,
+            "end_year": None,
+        },
+    )
+
+    diff = archivist.build_diff(parsed, resolved, inferred)
+    update_item = next(c for c in diff if c.category == "timeline" and c.action == "update")
 
     # Apply the diff item the way Phase 5's approval loop will.
-    storage.save_entity(
-        character_update.category, character_update.entity_id, character_update.fields
-    )
+    storage.save_entity(update_item.category, update_item.entity_id, update_item.fields)
 
-    assert "imprisoned" not in storage.get_status_effects("char_jang")
+    assert not storage.get_current_state("char_p4_prisoner2", "imprisoned")

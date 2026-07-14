@@ -9,6 +9,14 @@ directly and skip this CLI shell entirely, the same way it would skip
 main.cli_loop() and call main.run_pipeline directly.
 """
 
+import sys
+
+# See main.py's identical block for why: Windows consoles default stdio to
+# the active code page (cp949 on Korean Windows), not UTF-8.
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+sys.stdin.reconfigure(encoding="utf-8")
+
 if __package__:
     from . import field_update, flags, mapping, schema, storage
 else:  # allows `python src/detail_panel.py` to run directly

@@ -103,17 +103,9 @@ def test_death_year_out_of_order_with_existing_events_is_rejected(monkeypatch):
         },
     )
     storage.save_entity("timeline", "event_e2e_reverse_a", {"year": 2100})
-    storage.save_entity(
-        "relationship",
-        "rel_e2e_reverse_a",
-        {"subject": "char_e2e_reverse", "predicate": "involved_in", "object": "event_e2e_reverse_a"},
-    )
+    storage.add_event_pointer("char_e2e_reverse", "event_e2e_reverse_a")
     storage.save_entity("timeline", "event_e2e_reverse_b", {"year": 2200})
-    storage.save_entity(
-        "relationship",
-        "rel_e2e_reverse_b",
-        {"subject": "char_e2e_reverse", "predicate": "involved_in", "object": "event_e2e_reverse_b"},
-    )
+    storage.add_event_pointer("char_e2e_reverse", "event_e2e_reverse_b")
     responder = _script()
     _patch_prompts(monkeypatch, responder)
 
@@ -170,11 +162,7 @@ def test_lifespan_warning_computed_from_event_years_only(monkeypatch):
         },
     )
     storage.save_entity("timeline", "event_e2e_nodates_a", {"year": 2000})
-    storage.save_entity(
-        "relationship",
-        "rel_e2e_nodates_a",
-        {"subject": "char_e2e_nodates", "predicate": "involved_in", "object": "event_e2e_nodates_a"},
-    )
+    storage.add_event_pointer("char_e2e_nodates", "event_e2e_nodates_a")
     responder = _script(("그래도 저장", "그래도 저장"), ("승인하시겠습니까", "y"))
     _patch_prompts(monkeypatch, responder)
 
@@ -220,13 +208,22 @@ def test_escape_clears_imprisoned_status_automatically(monkeypatch):
     storage.save_entity(
         "character",
         "char_e2e_prisoner",
+        {"name": "가일", "birth_year": 2000, "notes": "가일은 용병 출신의 인물이다."},
+    )
+    storage.save_entity(
+        "timeline",
+        "event_e2e_prisoner_status",
         {
-            "name": "가일",
-            "birth_year": 2000,
-            "active_status_effects": [{"status": "imprisoned", "start_year": 2050, "end_year": None}],
-            "notes": "가일은 용병 출신의 인물이다.",
+            "entity": "char_e2e_prisoner",
+            "predicate": "imprisoned",
+            "target": None,
+            "start_year": 2050,
+            "end_year": None,
+            "notes": "가일이 2050년부터 수감 상태다.",
         },
     )
+    storage.add_event_pointer("char_e2e_prisoner", "event_e2e_prisoner_status")
+
     # "그래도 저장" is a defensive fallback in case some other judgment (e.g.
     # rule_violation) also fires alongside the expected clears_status one —
     # the assertion below is what actually verifies the auto-clear behavior.
@@ -236,7 +233,7 @@ def test_escape_clears_imprisoned_status_automatically(monkeypatch):
     result = main.run_pipeline("2100년, [가일]이 탈출해서 마을로 도망쳤다.")
 
     assert result["status"] == "saved"
-    assert "imprisoned" not in storage.get_status_effects("char_e2e_prisoner")
+    assert not storage.get_current_state("char_e2e_prisoner", "imprisoned")
 
 
 # ---------------------------------------------------------------------------
@@ -248,13 +245,22 @@ def test_imprisoned_character_fighting_raises_conflict_popup(monkeypatch):
     storage.save_entity(
         "character",
         "char_e2e_prisoner2",
+        {"name": "테오", "birth_year": 2000, "notes": "테오는 용병 출신의 인물이다."},
+    )
+    storage.save_entity(
+        "timeline",
+        "event_e2e_prisoner2_status",
         {
-            "name": "테오",
-            "birth_year": 2000,
-            "active_status_effects": [{"status": "imprisoned", "start_year": 2050, "end_year": None}],
-            "notes": "테오는 용병 출신의 인물이다.",
+            "entity": "char_e2e_prisoner2",
+            "predicate": "imprisoned",
+            "target": None,
+            "start_year": 2050,
+            "end_year": None,
+            "notes": "테오가 2050년부터 수감 상태다.",
         },
     )
+    storage.add_event_pointer("char_e2e_prisoner2", "event_e2e_prisoner2_status")
+
     responder = _script(("그래도 저장", "그래도 저장"), ("승인하시겠습니까", "y"))
     _patch_prompts(monkeypatch, responder)
 
@@ -265,7 +271,7 @@ def test_imprisoned_character_fighting_raises_conflict_popup(monkeypatch):
     assert any(j.type == "conflict" for j in result.get("rag_judgments", []))
     assert result["status"] == "saved"
     # Still marked imprisoned — the contradiction was accepted, not resolved.
-    assert "imprisoned" in storage.get_status_effects("char_e2e_prisoner2")
+    assert storage.get_current_state("char_e2e_prisoner2", "imprisoned")
 
 
 # ---------------------------------------------------------------------------

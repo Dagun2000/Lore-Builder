@@ -2,6 +2,13 @@ import shutil
 import sys
 from pathlib import Path
 
+# Windows consoles default stdout to the active code page (cp949 on Korean
+# Windows), not UTF-8 — pytest's own captured-output sections would
+# otherwise show Korean test data/prints as mojibake. See main.py's
+# identical block.
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 _BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_BASE_DIR))
 

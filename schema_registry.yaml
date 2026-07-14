@@ -1,6 +1,8 @@
 character:
   id_prefix: char_
   fields:
+    # required: name / optional: gender, birth_year, death_year, race,
+    # appearance, notes, lifespan_check_ack, event_ids
     - name: name
       type: text
       required: true
@@ -20,10 +22,6 @@ character:
       type: reference
       ref_category: race
       required: false
-    - name: faction
-      type: reference
-      ref_category: faction
-      required: false
     - name: appearance
       type: text
       required: false
@@ -33,13 +31,14 @@ character:
     - name: lifespan_check_ack
       type: boolean
       required: false
-    - name: active_status_effects
+    - name: event_ids
       type: list
       required: false
 
 race:
   id_prefix: race_
   fields:
+    # required: name / optional: lifespan, weaknesses, notes, event_ids
     - name: name
       type: text
       required: true
@@ -52,10 +51,15 @@ race:
     - name: notes
       type: text
       required: false
+    - name: event_ids
+      type: list
+      required: false
 
 location:
   id_prefix: loc_
   fields:
+    # required: name, category / optional: founded_year, destroyed_year,
+    # notes, event_ids
     - name: name
       type: text
       required: true
@@ -63,10 +67,6 @@ location:
       type: enum
       options: [kingdom, city, ruins, wilderness, dungeon, tavern]
       required: true
-    - name: controlling_faction
-      type: reference
-      ref_category: faction
-      required: false
     - name: founded_year
       type: integer
       required: false
@@ -78,13 +78,15 @@ location:
     - name: notes
       type: text
       required: false
-    - name: active_status_effects
+    - name: event_ids
       type: list
       required: false
 
 faction:
   id_prefix: faction_
   fields:
+    # required: name, category / optional: founded_year, disbanded_year,
+    # notes, event_ids
     - name: name
       type: text
       required: true
@@ -92,10 +94,6 @@ faction:
       type: enum
       options: [mercenary_guild, kingdom, religious_order, tribe]
       required: true
-    - name: territory
-      type: reference
-      ref_category: location
-      required: false
     - name: founded_year
       type: integer
       required: false
@@ -107,16 +105,21 @@ faction:
     - name: notes
       type: text
       required: false
-    - name: active_status_effects
+    - name: event_ids
       type: list
       required: false
 
 artifact:
   id_prefix: item_
   fields:
+    # required: name, current_status / optional: current_owner,
+    # origin_event, destroyed_year, notes, event_ids
     - name: name
       type: text
       required: true
+    # Cached, not authoritative — always re-derived from the latest
+    # predicate:"owns" duration event touching this artifact at save time
+    # (see archivist.build_diff), never hand-edited independently of that.
     - name: current_owner
       type: reference
       ref_category: character
@@ -137,56 +140,59 @@ artifact:
     - name: notes
       type: text
       required: false
-    - name: active_status_effects
+    - name: event_ids
       type: list
       required: false
 
 timeline:
   id_prefix: event_
   fields:
+    # required: none (schema-level) — a point record needs year, a duration
+    # record needs entity/predicate/start_year; enforced by archivist, not
+    # here / optional: notes, year, location, entity, predicate, target,
+    # start_year, end_year
+    # Common to both event shapes.
+    - name: notes
+      type: text
+      required: false
+    # Point-event fields — a moment-in-time occurrence, no ongoing state.
     - name: year
       type: integer
-      required: true
+      required: false
       role: timeline_point
     - name: location
       type: reference
       ref_category: location
       required: false
-    - name: status_effect
-      type: reference
-      ref_category: status_effect
-      required: false
-    - name: notes
-      type: text
-      required: false
-
-relationship:
-  id_prefix: rel_
-  fields:
-    - name: subject
+    # Duration-event fields — an ongoing relationship or personal status,
+    # represented as one record with a start and (optionally) an end,
+    # instead of a separate `relationship` row + a snapshot field on the
+    # entity. `predicate` is a status_effects.yaml id for a personal state
+    # (target left empty) or free text for a relationship (target filled).
+    - name: entity
       type: reference
       ref_category: any
-      required: true
+      required: false
     - name: predicate
       type: text
-      required: true
-    - name: object
+      required: false
+    - name: target
       type: reference
       ref_category: any
-      required: true
-    - name: since
+      required: false
+    - name: start_year
       type: integer
       required: false
-    - name: until
+      role: lifecycle_start
+    - name: end_year
       type: integer
       required: false
-    - name: notes
-      type: text
-      required: false
+      role: lifecycle_end
 
 system:
   id_prefix: system_
   fields:
+    # required: domain, hard_rule / optional: notes
     - name: domain
       type: enum
       options: [magic, divine, artifact_law, physics]

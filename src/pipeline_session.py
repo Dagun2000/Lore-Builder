@@ -36,14 +36,15 @@ _STAGE_BY_DECISION = {
     "entity_required_field": "resolving_entities",
     "hard_check_warning": "hard_checking",
     "rag_judgment": "rag_checking",
-    "diff_item": "reviewing_diff",
+    "multi_event_warning": "confirming_event",
+    "diff_review": "reviewing_diff",
 }
 
 # Fields never offered on the new-entity confirm/edit screens: name has its
-# own dedicated step, and active_status_effects is system-managed (archivist
-# writes {"status", "start_year", "end_year"} range dicts to it — a raw
-# comma-separated form value would corrupt that shape).
-_NOT_EDITABLE_ON_CREATE = {"name", "active_status_effects"}
+# own dedicated step, and event_ids is system-managed (archivist writes
+# pointers there directly — a raw comma-separated form value would corrupt
+# that shape).
+_NOT_EDITABLE_ON_CREATE = {"name", "event_ids"}
 
 
 class EntityCreationCancelled(Exception):
@@ -280,22 +281,34 @@ def _review_rag_judgments_gen(judgments: list):
 
 
 def _review_diff_gen(diff: list):
-    approved = []
-    for item in diff:
-        answer = yield PendingDecision(
-            "diff_item",
-            {
-                "action": item.action,
-                "category": item.category,
-                "entity_id": item.entity_id,
-                "fields": item.fields,
-                "reason": item.reason,
-            },
-            {},
-        )
-        if answer:
-            approved.append(item)
-    return approved
+    """One bundled decision for the whole diff, not one per ChangeItem.
+    Phase 10's diffs are always "one primary timeline record + pointer/cache
+    updates that belong to it" (never several unrelated changes at once, the
+    way old relationship-heavy diffs sometimes were) — so there's nothing to
+    approve item-by-item. Show the primary record plus who else gets
+    touched, and it's just 저장 (apply everything) or 취소 (apply nothing);
+    no per-field edit here — if something in `affected_entities` is wrong,
+    that's an entity-resolution problem to fix by re-submitting the input,
+    not something to patch mid-review."""
+    if not diff:
+        return []
+
+    primary = next((c for c in diff if c.category == "timeline"), diff[0])
+    affected = [c.entity_id for c in diff if c is not primary]
+
+    answer = yield PendingDecision(
+        "diff_review",
+        {
+            "action": primary.action,
+            "category": primary.category,
+            "entity_id": primary.entity_id,
+            "fields": primary.fields,
+            "reason": primary.reason,
+            "affected_entities": affected,
+        },
+        {},
+    )
+    return diff if answer else []
 
 
 def _apply_diff(approved: list) -> list:
@@ -317,11 +330,12 @@ def _apply_diff(approved: list) -> list:
 
 def _pipeline_generator(session: PipelineSession):
     parsed = parser.parse_input(session.user_input)
+    primary_year = parsed.years[0]
 
     resolved_entities = {}
     for tag in parsed.tags:
         try:
-            entity_id = yield from _resolve_entity_gen(session, tag, parsed.raw_text, parsed.year)
+            entity_id = yield from _resolve_entity_gen(session, tag, parsed.raw_text, primary_year)
         except EntityCreationCancelled as exc:
             return {
                 "status": "cancelled",
@@ -332,13 +346,11 @@ def _pipeline_generator(session: PipelineSession):
         resolved_entities[tag] = entity_id
         session.resolved_entities = dict(resolved_entities)
 
-    inferred_event = inference.infer_relationship_and_event(
-        resolved_entities, parsed.raw_text, parsed.year
-    )
+    inferred_event = inference.infer_event(resolved_entities, parsed.raw_text, parsed.years)
     session.inferred_event = inferred_event
 
     rag_judgments = rag_check.run_rag_checks(
-        list(resolved_entities.values()), parsed.raw_text, parsed.year
+        list(resolved_entities.values()), parsed.raw_text, primary_year
     )
     session.rag_judgments = rag_judgments
 
@@ -347,12 +359,12 @@ def _pipeline_generator(session: PipelineSession):
         category = schema.category_from_id(entity_id)
         if category is None:
             continue
-        # Only entities the event implies were actually present/alive at
-        # parsed.year get that year injected as a hard-check constraint —
-        # see main.run_pipeline's identical comment for the "digging up a
-        # grave" vs "playing together" example this guards against.
+        # Only entities the event implies were actually present/alive get
+        # this event's year(s) injected as a hard-check constraint — see
+        # main.run_pipeline's identical comment for the "digging up a grave"
+        # vs "playing together" example this guards against.
         is_present = inferred_event.entity_presence.get(entity_id, True)
-        extra_years = [parsed.year] if is_present else None
+        extra_years = list(parsed.years) if is_present else None
         conflicts.extend(hard_check.run_hard_checks(category, entity_id, extra_years=extra_years))
     session.hard_check_conflicts = conflicts
 
@@ -374,7 +386,29 @@ def _pipeline_generator(session: PipelineSession):
             "rag_judgments": rag_judgments,
         }
 
-    diff = archivist.build_diff(parsed, resolved_entities, inferred_event, rag_judgments)
+    diff = archivist.build_diff(parsed, resolved_entities, inferred_event)
+    if isinstance(diff, archivist.ConfirmationNeeded):
+        # No partial diff exists to fall back to — ConfirmationNeeded means
+        # no single coherent record could be built at all. "계속 진행" can
+        # only mean "acknowledge and stop here without saving anything" (the
+        # user re-submits as separate, clearer inputs); "취소" reaches the
+        # same outcome, just labeled as an explicit cancel rather than a
+        # shrug.
+        proceed = yield PendingDecision("multi_event_warning", {"reason": diff.reason}, {})
+        if proceed:
+            return {
+                "status": "no_changes",
+                "stage": "confirmation",
+                "resolved_entities": resolved_entities,
+                "message": diff.reason,
+            }
+        return {
+            "status": "cancelled",
+            "stage": "confirmation",
+            "resolved_entities": resolved_entities,
+            "message": diff.reason,
+        }
+
     session.diff = diff
     approved = yield from _review_diff_gen(diff)
     session.diff_approved = approved

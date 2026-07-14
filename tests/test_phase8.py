@@ -87,17 +87,9 @@ def test_death_year_out_of_order_with_existing_events_is_rejected(monkeypatch):
         },
     )
     storage.save_entity("timeline", "event_p8_reverse_a", {"year": 2100})
-    storage.save_entity(
-        "relationship",
-        "rel_p8_reverse_a",
-        {"subject": "char_p8_reverse", "predicate": "involved_in", "object": "event_p8_reverse_a"},
-    )
+    storage.add_event_pointer("char_p8_reverse", "event_p8_reverse_a")
     storage.save_entity("timeline", "event_p8_reverse_b", {"year": 2200})
-    storage.save_entity(
-        "relationship",
-        "rel_p8_reverse_b",
-        {"subject": "char_p8_reverse", "predicate": "involved_in", "object": "event_p8_reverse_b"},
-    )
+    storage.add_event_pointer("char_p8_reverse", "event_p8_reverse_b")
     monkeypatch.setattr(main, "_prompt", _script())
 
     result = main.run_pipeline_interactive("2180년, [델피나]가 시장에서 물건을 샀다.")
@@ -144,11 +136,7 @@ def test_lifespan_warning_computed_from_event_years_only(monkeypatch):
         },
     )
     storage.save_entity("timeline", "event_p8_nodates_a", {"year": 2000})
-    storage.save_entity(
-        "relationship",
-        "rel_p8_nodates_a",
-        {"subject": "char_p8_nodates", "predicate": "involved_in", "object": "event_p8_nodates_a"},
-    )
+    storage.add_event_pointer("char_p8_nodates", "event_p8_nodates_a")
     monkeypatch.setattr(
         main, "_prompt", _script(("그래도 저장", "그래도 저장"), ("승인하시겠습니까", "y"))
     )
@@ -184,13 +172,22 @@ def test_escape_clears_imprisoned_status_automatically(monkeypatch):
     storage.save_entity(
         "character",
         "char_p8_prisoner",
+        {"name": "브락스", "birth_year": 2000, "notes": "브락스는 용병 출신의 인물이다."},
+    )
+    storage.save_entity(
+        "timeline",
+        "event_p8_prisoner_status",
         {
-            "name": "브락스",
-            "birth_year": 2000,
-            "active_status_effects": [{"status": "imprisoned", "start_year": 2050, "end_year": None}],
-            "notes": "브락스는 용병 출신의 인물이다.",
+            "entity": "char_p8_prisoner",
+            "predicate": "imprisoned",
+            "target": None,
+            "start_year": 2050,
+            "end_year": None,
+            "notes": "브락스가 2050년부터 수감 상태다.",
         },
     )
+    storage.add_event_pointer("char_p8_prisoner", "event_p8_prisoner_status")
+
     monkeypatch.setattr(
         main, "_prompt", _script(("그래도 저장하시겠습니까", "그래도 저장"), ("승인하시겠습니까", "y"))
     )
@@ -198,20 +195,29 @@ def test_escape_clears_imprisoned_status_automatically(monkeypatch):
     result = main.run_pipeline_interactive("2100년, [브락스]가 탈출해서 마을로 도망쳤다.")
 
     assert result["status"] == "saved"
-    assert "imprisoned" not in storage.get_status_effects("char_p8_prisoner")
+    assert not storage.get_current_state("char_p8_prisoner", "imprisoned")
 
 
 def test_imprisoned_character_fighting_raises_conflict_popup(monkeypatch):
     storage.save_entity(
         "character",
         "char_p8_prisoner2",
+        {"name": "카인", "birth_year": 2000, "notes": "카인은 용병 출신의 인물이다."},
+    )
+    storage.save_entity(
+        "timeline",
+        "event_p8_prisoner2_status",
         {
-            "name": "카인",
-            "birth_year": 2000,
-            "active_status_effects": [{"status": "imprisoned", "start_year": 2050, "end_year": None}],
-            "notes": "카인은 용병 출신의 인물이다.",
+            "entity": "char_p8_prisoner2",
+            "predicate": "imprisoned",
+            "target": None,
+            "start_year": 2050,
+            "end_year": None,
+            "notes": "카인이 2050년부터 수감 상태다.",
         },
     )
+    storage.add_event_pointer("char_p8_prisoner2", "event_p8_prisoner2_status")
+
     responder = _script(("그래도 저장", "그래도 저장"), ("승인하시겠습니까", "y"))
     monkeypatch.setattr(main, "_prompt", responder)
 
@@ -221,7 +227,7 @@ def test_imprisoned_character_fighting_raises_conflict_popup(monkeypatch):
     assert conflict_prompts  # the popup was actually shown
     assert any(j.type == "conflict" for j in result.get("rag_judgments", []))
     assert result["status"] == "saved"
-    assert "imprisoned" in storage.get_status_effects("char_p8_prisoner2")
+    assert storage.get_current_state("char_p8_prisoner2", "imprisoned")
 
 
 def test_elf_eating_meat_triggers_notes_conflict(monkeypatch):
@@ -321,8 +327,8 @@ def test_edit_reveals_full_field_form_for_non_character():
     assert session.pending_decision.payload["category"] == "faction"
     fields_by_name = {f["name"]: f for f in session.pending_decision.payload["fields"]}
     assert fields_by_name["category"]["required"] is True
-    assert "territory" in fields_by_name  # optional, still offered in "edit"
-    assert fields_by_name["territory"]["required"] is False
+    assert "founded_year" in fields_by_name  # optional, still offered in "edit"
+    assert fields_by_name["founded_year"]["required"] is False
 
 
 def test_cancel_entity_creation_aborts_whole_input():

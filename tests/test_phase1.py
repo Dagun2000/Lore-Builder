@@ -1,13 +1,9 @@
 from src import hard_check, storage
 
 
-def _link_event(character_id: str, event_id: str, year: int) -> None:
+def _link_event(entity_id: str, event_id: str, year: int) -> None:
     storage.save_entity("timeline", event_id, {"year": year})
-    storage.save_entity(
-        "relationship",
-        f"rel_{character_id}_{event_id}",
-        {"subject": character_id, "predicate": "involved_in", "object": event_id},
-    )
+    storage.add_event_pointer(entity_id, event_id)
 
 
 def test_terminal_check_passes_when_no_death_year():
@@ -112,16 +108,7 @@ def test_terminal_check_catches_artifact_reappearing_after_destroyed_year():
         "item_t8_relic",
         {"current_status": "destroyed", "destroyed_year": 2100},
     )
-    storage.save_entity("timeline", "event_t8_reappear", {"year": 2150})
-    storage.save_entity(
-        "relationship",
-        "rel_item_t8_relic_event_t8_reappear",
-        {
-            "subject": "item_t8_relic",
-            "predicate": "appeared_in",
-            "object": "event_t8_reappear",
-        },
-    )
+    _link_event("item_t8_relic", "event_t8_reappear", 2150)
 
     conflict = hard_check.check_terminal_violation("artifact", "item_t8_relic")
 
@@ -135,16 +122,7 @@ def test_run_hard_checks_on_artifact_only_runs_terminal_check():
         "item_t9_relic",
         {"current_status": "destroyed", "destroyed_year": 2100},
     )
-    storage.save_entity("timeline", "event_t9_reappear", {"year": 2150})
-    storage.save_entity(
-        "relationship",
-        "rel_item_t9_relic_event_t9_reappear",
-        {
-            "subject": "item_t9_relic",
-            "predicate": "appeared_in",
-            "object": "event_t9_reappear",
-        },
-    )
+    _link_event("item_t9_relic", "event_t9_reappear", 2150)
 
     conflicts = hard_check.run_hard_checks("artifact", "item_t9_relic")
 
@@ -159,9 +137,7 @@ def test_run_hard_checks_on_location_does_not_crash_and_skips_lifespan():
         "loc_t10_ruin",
         {"category": "ruins", "founded_year": 1000, "destroyed_year": 1200},
     )
-    storage.save_entity(
-        "timeline", "event_t10_late", {"year": 1300, "location": "loc_t10_ruin"}
-    )
+    _link_event("loc_t10_ruin", "event_t10_late", 1300)
 
     conflicts = hard_check.run_hard_checks("location", "loc_t10_ruin")
 

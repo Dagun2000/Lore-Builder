@@ -39,16 +39,9 @@ def test_clear_flag_removes_it():
 def test_update_field_flow_flagging_is_independent_of_field_save(monkeypatch):
     storage.save_entity("character", "char_p65_d", {"name": "가름"})
     storage.save_entity(
-        "faction",
-        "faction_p65_d",
-        {"name": "P65길드", "category": "tribe", "notes": "무관한 조직."},
+        "timeline", "event_p65_d", {"year": 2050, "notes": "가름과 관련된 무관한 사건."}
     )
-    storage.save_to_chroma("faction_p65_d", "무관한 조직.", {"category": "faction"})
-    storage.save_entity(
-        "relationship",
-        "rel_p65_d",
-        {"subject": "char_p65_d", "predicate": "related_to", "object": "faction_p65_d"},
-    )
+    storage.add_event_pointer("char_p65_d", "event_p65_d")
 
     # 1 -> flag the first (only) related record, then a reason, then save.
     responses = iter(["1", "다시 확인 필요", "y"])
@@ -61,24 +54,17 @@ def test_update_field_flow_flagging_is_independent_of_field_save(monkeypatch):
 
     assert len(result["flagged"]) == 1
     flagged_entry = result["flagged"][0]
-    assert flagged_entry.entity_id == "faction_p65_d"
+    assert flagged_entry.entity_id == "event_p65_d"
     assert flagged_entry.reason == "다시 확인 필요"
-    assert any(f.entity_id == "faction_p65_d" for f in flags.list_flags())
+    assert any(f.entity_id == "event_p65_d" for f in flags.list_flags())
 
 
 def test_update_field_flow_skipping_flag_prompt_still_saves_normally(monkeypatch):
     storage.save_entity("character", "char_p65_e", {"name": "누리"})
     storage.save_entity(
-        "faction",
-        "faction_p65_e",
-        {"name": "P65다른길드", "category": "tribe", "notes": "무관한 길드."},
+        "timeline", "event_p65_e", {"year": 2050, "notes": "누리와 관련된 무관한 사건."}
     )
-    storage.save_to_chroma("faction_p65_e", "무관한 길드.", {"category": "faction"})
-    storage.save_entity(
-        "relationship",
-        "rel_p65_e",
-        {"subject": "char_p65_e", "predicate": "related_to", "object": "faction_p65_e"},
-    )
+    storage.add_event_pointer("char_p65_e", "event_p65_e")
 
     # Enter to skip flagging entirely, then y to save — proves the flag
     # prompt being skipped doesn't disrupt the pre-existing Phase 6 flow.

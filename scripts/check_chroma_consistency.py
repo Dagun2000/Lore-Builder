@@ -13,6 +13,11 @@ Usage:
 import sys
 from pathlib import Path
 
+# Windows consoles default stdout to the active code page (cp949 on Korean
+# Windows), not UTF-8 — see main.py's identical block.
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
@@ -43,7 +48,7 @@ def check(backfill: bool = False) -> list:
             print(f"  -> backfilled from {'notes' if entity.get('notes') else 'name/id'}")
 
     if not missing:
-        print("No gaps found - every SQLite entity has a matching Chroma document.")
+        print("No gaps found — every SQLite entity has a matching Chroma document.")
     else:
         print(f"\n{len(missing)} gap(s) found" + (", backfilled." if backfill else " (re-run with --backfill to fix)."))
 

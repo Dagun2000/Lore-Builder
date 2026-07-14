@@ -1,8 +1,8 @@
-"""Phase 6 — existing-entity field update + related-record search.
+"""Phase 6 — existing-entity field update + related-record listing.
 
-find_related_context does pure retrieval + ranking (Chroma similarity over
-a fixed candidate pool) — no LLM call, so these tests don't need an API key,
-unlike Phase 3/5's judgment-calling tests.
+Phase 10 replaced find_related_context's relationship-table-plus-Chroma-
+similarity search with a plain event_ids listing — no ranking, no LLM call,
+so these tests still don't need an API key.
 """
 
 from src import field_update, storage
@@ -12,11 +12,7 @@ def test_update_structured_field_reuses_phase1_lifespan_warning(monkeypatch):
     storage.save_entity("race", "race_p6_short", {"name": "단명종", "lifespan": 50})
     storage.save_entity("character", "char_p6_a", {"name": "가온", "birth_year": 2000})
     storage.save_entity("timeline", "event_p6_a", {"year": 2100})
-    storage.save_entity(
-        "relationship",
-        "rel_p6_a",
-        {"subject": "char_p6_a", "predicate": "involved_in", "object": "event_p6_a"},
-    )
+    storage.add_event_pointer("char_p6_a", "event_p6_a")
 
     monkeypatch.setattr(field_update.approval, "_prompt", lambda message: "그래도 저장")
 
@@ -31,133 +27,73 @@ def test_update_structured_field_reuses_phase1_lifespan_warning(monkeypatch):
     assert entity["lifespan_check_ack"]
 
 
-def test_find_related_context_full_recall_relationship_and_timeline():
-    # Reachable ONLY via the relationship bucket (counterpart is a real
-    # entity, not an event).
-    storage.save_entity(
-        "faction",
-        "faction_p6_guild",
-        {"name": "P6길드", "category": "mercenary_guild", "notes": "여성만 가입 가능."},
-    )
-    storage.save_to_chroma("faction_p6_guild", "P6길드는 여성 전용 길드다.", {"category": "faction"})
-
-    # Reachable ONLY via the timeline bucket (relationship-mediated to an
-    # event_, per find_related_timeline_ids' indirect path).
+def test_find_related_context_lists_every_pointed_at_event():
     storage.save_entity("character", "char_p6_b", {"name": "레인"})
-    storage.save_entity(
-        "timeline", "event_p6_b", {"year": 2050, "notes": "레인과 관련된 유일한 사건 기록."}
-    )
-    storage.save_to_chroma("event_p6_b", "레인과 관련된 유일한 사건 기록.", {"category": "timeline"})
 
     storage.save_entity(
-        "relationship",
-        "rel_p6_guild",
-        {"subject": "char_p6_b", "predicate": "member_of", "object": "faction_p6_guild"},
+        "timeline",
+        "event_p6_b_membership",
+        {
+            "entity": "char_p6_b",
+            "predicate": "member_of",
+            "target": "faction_mercenary_guild",
+            "start_year": 2040,
+            "end_year": None,
+            "notes": "레인이 용병 길드에 들어갔다.",
+        },
     )
-    storage.save_entity(
-        "relationship",
-        "rel_p6_event",
-        {"subject": "char_p6_b", "predicate": "involved_in", "object": "event_p6_b"},
-    )
+    storage.add_event_pointer("char_p6_b", "event_p6_b_membership")
 
-    docs = field_update.find_related_context("char_p6_b", "gender", "남성")
+    storage.save_entity(
+        "timeline", "event_p6_b_duel", {"year": 2050, "notes": "레인과 관련된 유일한 사건 기록."}
+    )
+    storage.add_event_pointer("char_p6_b", "event_p6_b_duel")
+
+    docs = field_update.find_related_context("char_p6_b")
 
     by_id = {d.entity_id: d for d in docs}
-    assert by_id["faction_p6_guild"].source == "relationship"
-    assert by_id["event_p6_b"].source == "timeline"
+    assert by_id["event_p6_b_membership"].source == "duration"
+    assert by_id["event_p6_b_membership"].relation == "member_of"
+    assert by_id["event_p6_b_duel"].source == "point"
+    assert by_id["event_p6_b_duel"].relation == "event"
+    # Chronological, not similarity-ranked: membership (2040) before duel (2050).
+    assert by_id["event_p6_b_membership"].relevance_rank < by_id["event_p6_b_duel"].relevance_rank
 
 
-def test_find_related_context_ranks_gender_synonyms_without_dropping_any():
+def test_find_related_context_drops_nothing_regardless_of_count():
     storage.save_entity("character", "char_p6_c", {"name": "노엘"})
+    event_ids = []
+    for i in range(4):
+        event_id = f"event_p6_c_{i}"
+        storage.save_entity("timeline", event_id, {"year": 2000 + i, "notes": f"노엘 관련 사건 {i}"})
+        storage.add_event_pointer("char_p6_c", event_id)
+        event_ids.append(event_id)
 
-    storage.save_entity(
-        "faction",
-        "faction_p6_women",
-        {"name": "여성단", "category": "tribe", "notes": "여성 전용으로 운영되는 부족이다."},
-    )
-    storage.save_to_chroma(
-        "faction_p6_women", "여성 전용으로 운영되는 부족이다.", {"category": "faction"}
-    )
-    storage.save_entity(
-        "relationship",
-        "rel_p6_c_women",
-        {"subject": "char_p6_c", "predicate": "related_to", "object": "faction_p6_women"},
-    )
+    docs = field_update.find_related_context("char_p6_c")
 
-    storage.save_entity(
-        "timeline", "event_p6_c_duel", {"year": 2060, "notes": "노엘이 남자들만의 결투에 참가했다."}
-    )
-    storage.save_to_chroma(
-        "event_p6_c_duel", "노엘이 남자들만의 결투에 참가했다.", {"category": "timeline"}
-    )
-    storage.save_entity(
-        "relationship",
-        "rel_p6_c_duel",
-        {"subject": "char_p6_c", "predicate": "involved_in", "object": "event_p6_c_duel"},
-    )
-
-    storage.save_entity(
-        "faction",
-        "faction_p6_lady",
-        {"name": "귀부인회", "category": "religious_order", "notes": "이 조직은 여인들만 받아들인다."},
-    )
-    storage.save_to_chroma(
-        "faction_p6_lady", "이 조직은 여인들만 받아들인다.", {"category": "faction"}
-    )
-    storage.save_entity(
-        "relationship",
-        "rel_p6_c_lady",
-        {"subject": "char_p6_c", "predicate": "related_to", "object": "faction_p6_lady"},
-    )
-
-    storage.save_entity(
-        "location",
-        "loc_p6_unrelated",
-        {"name": "평범한 시장", "category": "city", "notes": "특별한 성별 조건이 없는 평범한 시장이다."},
-    )
-    storage.save_to_chroma(
-        "loc_p6_unrelated", "특별한 성별 조건이 없는 평범한 시장이다.", {"category": "location"}
-    )
-    storage.save_entity(
-        "relationship",
-        "rel_p6_c_market",
-        {"subject": "char_p6_c", "predicate": "visited", "object": "loc_p6_unrelated"},
-    )
-
-    docs = field_update.find_related_context("char_p6_c", "성별", "남성")
-
-    doc_ids = {d.entity_id for d in docs}
-    for expected_id in (
-        "faction_p6_women",
-        "event_p6_c_duel",
-        "faction_p6_lady",
-        "loc_p6_unrelated",
-    ):
-        assert expected_id in doc_ids, f"{expected_id} missing from ranked results"
+    assert {d.entity_id for d in docs} == set(event_ids)
 
 
 def test_update_field_flow_race_triggers_both_tracks(monkeypatch):
     storage.save_entity("race", "race_p6_short2", {"name": "단명종2", "lifespan": 50})
     storage.save_entity("character", "char_p6_d", {"name": "다온", "birth_year": 2000})
     storage.save_entity("timeline", "event_p6_d", {"year": 2100})
+    storage.add_event_pointer("char_p6_d", "event_p6_d")
     storage.save_entity(
-        "relationship",
-        "rel_p6_d",
-        {"subject": "char_p6_d", "predicate": "involved_in", "object": "event_p6_d"},
+        "timeline",
+        "event_p6_d_rejection",
+        {
+            "entity": "faction_p6_d",
+            "predicate": "rejects",
+            "target": "char_p6_d",
+            "start_year": 2090,
+            "end_year": None,
+            "notes": "단명종2는 절대 받아주지 않는다.",
+        },
     )
-    storage.save_entity(
-        "faction",
-        "faction_p6_d",
-        {"name": "단명종반대", "category": "tribe", "notes": "단명종2는 절대 받아주지 않는다."},
-    )
-    storage.save_to_chroma(
-        "faction_p6_d", "단명종2는 절대 받아주지 않는다.", {"category": "faction"}
-    )
-    storage.save_entity(
-        "relationship",
-        "rel_p6_d_faction",
-        {"subject": "char_p6_d", "predicate": "related_to", "object": "faction_p6_d"},
-    )
+    storage.save_entity("faction", "faction_p6_d", {"name": "단명종반대", "category": "tribe"})
+    storage.add_event_pointer("char_p6_d", "event_p6_d_rejection")
+    storage.add_event_pointer("faction_p6_d", "event_p6_d_rejection")
 
     monkeypatch.setattr(field_update, "_prompt", lambda message: "y")
     monkeypatch.setattr(field_update.approval, "_prompt", lambda message: "그래도 저장")
@@ -166,7 +102,7 @@ def test_update_field_flow_race_triggers_both_tracks(monkeypatch):
 
     assert result["status"] == "saved"
     assert any(c.check_type == "lifespan" for c in result["conflicts"])  # Track A ran
-    assert any(d.entity_id == "faction_p6_d" for d in result["related_docs"])  # Track B ran
+    assert any(d.entity_id == "event_p6_d_rejection" for d in result["related_docs"])  # Track B ran
     assert storage.get_entity("character", "char_p6_d")["race"] == "race_p6_short2"
 
 
@@ -191,12 +127,7 @@ def test_update_field_flow_more_reveals_remaining_docs(monkeypatch, capsys):
         event_id = f"event_p6_more_{i}"
         text = f"핀 관련 사건 {i}"
         storage.save_entity("timeline", event_id, {"year": 2000 + i, "notes": text})
-        storage.save_to_chroma(event_id, text, {"category": "timeline"})
-        storage.save_entity(
-            "relationship",
-            f"rel_p6_more_{i}",
-            {"subject": "char_p6_f", "predicate": "involved_in", "object": event_id},
-        )
+        storage.add_event_pointer("char_p6_f", event_id)
 
     # "more" -> expand the rest, "" -> skip flagging (Phase 6.5), "y" -> save.
     responses = iter(["more", "", "y"])

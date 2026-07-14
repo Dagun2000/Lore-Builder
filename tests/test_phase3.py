@@ -7,19 +7,18 @@ since LLM output isn't 100% deterministic.
 from src import inference, rag_check
 
 
-def test_infer_relationship_and_event_basic():
+def test_infer_event_basic_point_event():
     resolved = {"쟝": "char_jang", "검은 산양 여관": "loc_black_goat_inn"}
 
-    result = inference.infer_relationship_and_event(
-        resolved, "쟝이 검은 산양 여관에서 얻어맞았다.", 2100
+    result = inference.infer_event(
+        resolved, "쟝이 검은 산양 여관에서 얻어맞았다.", [2100]
     )
 
+    assert result.is_single_event
+    assert result.event_type == "point"
     assert result.event_summary
-    assert any(
-        r.get("subject") in resolved.values() and r.get("object") in resolved.values()
-        for r in result.relationships
-    )
-    assert result.status_effect is None
+    assert set(result.involved_entities) <= set(resolved.values())
+    assert result.duration_effect is None
 
 
 def test_check_status_consistency_detects_clear():

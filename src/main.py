@@ -7,6 +7,17 @@ future GUI can render outcomes without scraping stdout — see approval.py's
 docstring for the note on _prompt/_print being the swap point for that GUI.
 """
 
+import sys
+
+# Windows consoles default sys.stdout/stdin to the active code page (cp949
+# on Korean Windows), not UTF-8 — every Korean string this CLI prints or
+# reads would otherwise come out as mojibake regardless of how correctly
+# the source files/DB are encoded. Force UTF-8 here, at the very top,
+# before any print()/input() call happens.
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+sys.stdin.reconfigure(encoding="utf-8")
+
 if __package__:
     from . import (
         archivist,
@@ -73,18 +84,18 @@ def run_pipeline(user_input: str) -> dict:
         _print(f"입력 오류: {exc}")
         return {"status": "error", "stage": "parse", "message": str(exc)}
 
+    primary_year = parsed.years[0]
+
     resolved_entities = {}
     for tag in parsed.tags:
         resolved_entities[tag] = mapping.resolve_entity(
-            tag, parsed.raw_text, parsed.year
+            tag, parsed.raw_text, primary_year
         )
 
-    inferred_event = inference.infer_relationship_and_event(
-        resolved_entities, parsed.raw_text, parsed.year
-    )
+    inferred_event = inference.infer_event(resolved_entities, parsed.raw_text, parsed.years)
 
     rag_judgments = rag_check.run_rag_checks(
-        list(resolved_entities.values()), parsed.raw_text, parsed.year
+        list(resolved_entities.values()), parsed.raw_text, primary_year
     )
 
     conflicts = []
@@ -92,13 +103,13 @@ def run_pipeline(user_input: str) -> dict:
         category = schema.category_from_id(entity_id)
         if category is None:
             continue
-        # Only entities the event implies were actually present/alive at
-        # parsed.year get that year injected as a hard-check constraint —
-        # e.g. digging up [쟝]'s grave shouldn't force 쟝 to have been alive
-        # for the dig's year, but playing together with [쟝] should. Default
+        # Only entities the event implies were actually present/alive get
+        # this event's year(s) injected as a hard-check constraint — e.g.
+        # digging up [쟝]'s grave shouldn't force 쟝 to have been alive for
+        # the dig's year, but playing together with [쟝] should. Default
         # True (old behavior) if the LLM omitted this entity_id.
         is_present = inferred_event.entity_presence.get(entity_id, True)
-        extra_years = [parsed.year] if is_present else None
+        extra_years = list(parsed.years) if is_present else None
         conflicts.extend(
             hard_check.run_hard_checks(category, entity_id, extra_years=extra_years)
         )
@@ -121,7 +132,25 @@ def run_pipeline(user_input: str) -> dict:
             "rag_judgments": rag_judgments,
         }
 
-    diff = archivist.build_diff(parsed, resolved_entities, inferred_event, rag_judgments)
+    diff = archivist.build_diff(parsed, resolved_entities, inferred_event)
+    if isinstance(diff, archivist.ConfirmationNeeded):
+        proceed = approval.review_confirmation_needed(diff)
+        if proceed:
+            _print("변경사항 없이 계속 진행합니다. 필요하다면 입력을 나눠서 다시 시도해주세요.")
+            return {
+                "status": "no_changes",
+                "stage": "confirmation",
+                "resolved_entities": resolved_entities,
+                "message": diff.reason,
+            }
+        _print("취소되었습니다.")
+        return {
+            "status": "cancelled",
+            "stage": "confirmation",
+            "resolved_entities": resolved_entities,
+            "message": diff.reason,
+        }
+
     approved = approval.review_diff(diff)
 
     if not approved:
@@ -248,6 +277,12 @@ def _render_entity_required_field(payload: dict) -> dict:
     return response
 
 
+def _render_multi_event_warning(payload: dict) -> bool:
+    _print(f"[확인 필요] {payload['reason']}")
+    answer = _prompt("계속 진행하시겠습니까? [계속 진행/취소]: ").strip()
+    return answer == "계속 진행"
+
+
 def _render_hard_check_warning(payload: dict) -> str:
     _print(f"[경고] {payload['entity_id']}: {payload['reason']}")
     return _prompt("그래도 저장하시겠습니까? [그래도 저장/수정/취소]: ").strip()
@@ -258,12 +293,18 @@ def _render_rag_judgment(payload: dict) -> str:
     return _prompt("그래도 저장하시겠습니까? [그래도 저장/수정/취소]: ").strip()
 
 
-def _render_diff_item(payload: dict, index: int, total: int) -> bool:
-    _print(f"[{index}/{total}] {payload['action'].upper()} {payload['category']}: {payload['entity_id']}")
+def _render_diff_review(payload: dict) -> bool:
+    """One bundled decision for the whole diff (Phase 10 patch) — the
+    primary record plus whichever other entities get an event_ids/cache
+    update alongside it, shown as information only. No per-item toggling,
+    no edit here: 저장 applies everything, 취소 applies nothing."""
+    _print(f"{payload['action'].upper()} {payload['category']}: {payload['entity_id']}")
     _print(f"  근거: {payload['reason']}")
     _print(f"  필드: {payload['fields']}")
-    answer = _prompt("  승인하시겠습니까? (y/n): ").strip().lower()
-    return answer == "y"
+    if payload["affected_entities"]:
+        _print(f"  함께 갱신되는 엔티티: {', '.join(payload['affected_entities'])}")
+    answer = _prompt("저장하시겠습니까? [저장/취소]: ").strip()
+    return answer == "저장"
 
 
 _DECISION_RENDERERS = {
@@ -273,6 +314,8 @@ _DECISION_RENDERERS = {
     "entity_required_field": _render_entity_required_field,
     "hard_check_warning": _render_hard_check_warning,
     "rag_judgment": _render_rag_judgment,
+    "multi_event_warning": _render_multi_event_warning,
+    "diff_review": _render_diff_review,
 }
 
 
@@ -302,18 +345,10 @@ def run_pipeline_interactive(user_input: str) -> dict:
     to show directly. Kept separate from cli_loop's while-loop so a single
     input can be exercised (e.g. from tests) without the surrounding REPL."""
     session = pipeline_session.start_session(user_input)
-    diff_total = None
-    diff_index = 0
 
     while session.pending_decision is not None:
         decision = session.pending_decision
-        if decision.decision_type == "diff_item":
-            if diff_total is None:
-                diff_total = len(session.diff)
-            diff_index += 1
-            response = _render_diff_item(decision.payload, diff_index, diff_total)
-        else:
-            response = _DECISION_RENDERERS[decision.decision_type](decision.payload)
+        response = _DECISION_RENDERERS[decision.decision_type](decision.payload)
         session = pipeline_session.resume_session(session.session_id, response)
 
     _print_result(session.result)

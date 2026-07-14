@@ -66,16 +66,34 @@ def review_rag_judgments(judgments: list) -> bool:
     return True
 
 
+def review_confirmation_needed(confirmation) -> bool:
+    """archivist.build_diff couldn't produce a coherent record at all —
+    either the sentence was judged to describe more than one event/status,
+    or a "clear" named a status/relationship that isn't actually open.
+    There's no partial diff to fall back to either way, so the only choices
+    are acknowledge-and-stop or cancel — both end up saving nothing."""
+    _print(f"[확인 필요] {confirmation.reason}")
+    answer = _prompt("계속 진행하시겠습니까? [계속 진행/취소]: ").strip()
+    return answer == "계속 진행"
+
+
 def review_diff(diff: list) -> list:
-    approved = []
-    total = len(diff)
+    """One bundled decision for the whole diff (Phase 10 patch), not one per
+    ChangeItem — a diff is always "one primary timeline record + pointer/
+    cache updates that belong to it", so there's nothing meaningful to
+    approve item-by-item. Shows the primary record plus who else gets
+    touched as information; 저장 applies everything, 취소 applies nothing."""
+    if not diff:
+        return []
 
-    for i, item in enumerate(diff, start=1):
-        _print(f"[{i}/{total}] {item.action.upper()} {item.category}: {item.entity_id}")
-        _print(f"  근거: {item.reason}")
-        _print(f"  필드: {item.fields}")
-        answer = _prompt("  승인하시겠습니까? (y/n): ").strip().lower()
-        if answer == "y":
-            approved.append(item)
+    primary = next((c for c in diff if c.category == "timeline"), diff[0])
+    affected = [c.entity_id for c in diff if c is not primary]
 
-    return approved
+    _print(f"{primary.action.upper()} {primary.category}: {primary.entity_id}")
+    _print(f"  근거: {primary.reason}")
+    _print(f"  필드: {primary.fields}")
+    if affected:
+        _print(f"  함께 갱신되는 엔티티: {', '.join(affected)}")
+
+    answer = _prompt("저장하시겠습니까? [저장/취소]: ").strip()
+    return diff if answer == "저장" else []

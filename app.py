@@ -14,7 +14,7 @@ the goal is being able to repeat every CLI test scenario through the GUI.
 
 import streamlit as st
 
-from src import field_update, flags, hard_check, pipeline_session, schema, storage
+from src import deletion, field_update, flags, hard_check, pipeline_session, schema, storage
 
 _NAME_BEARING_CATEGORIES = ("character", "location", "faction", "artifact", "race")
 
@@ -36,6 +36,7 @@ def _init_session_state() -> None:
         "detail_related_docs": [],
         "detail_new_value": None,
         "detail_flag_selection": {},
+        "detail_confirm_delete": False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -66,6 +67,7 @@ def _navigate_to_entity(entity_id) -> None:
     st.session_state.detail_conflicts = []
     st.session_state.detail_related_docs = []
     st.session_state.detail_flag_selection = {}
+    st.session_state.detail_confirm_delete = False
     st.session_state.selected_entity = entity_id
 
 
@@ -277,15 +279,31 @@ def _render_rag_judgment(session, decision, key_prefix) -> None:
         _resume(session, "취소")
 
 
-def _render_diff_item(session, decision, key_prefix) -> None:
+def _render_diff_review(session, decision, key_prefix) -> None:
+    """One bundled decision for the whole diff (Phase 10 patch) — the
+    primary record plus whichever other entities get an event_ids/cache
+    update alongside it, shown as information only. No per-item toggling,
+    no edit here: 저장 applies everything, 취소 applies nothing."""
     payload = decision.payload
     st.write(f"**{payload['action'].upper()} {payload['category']}**: {payload['entity_id']}")
     st.caption(f"근거: {payload['reason']}")
     st.json(payload["fields"])
+    if payload["affected_entities"]:
+        st.caption("함께 갱신되는 엔티티: " + ", ".join(payload["affected_entities"]))
     col1, col2 = st.columns(2)
-    if col1.button("승인", key=f"{key_prefix}_approve"):
+    if col1.button("저장", key=f"{key_prefix}_save"):
         _resume(session, True)
-    if col2.button("거부", key=f"{key_prefix}_reject"):
+    if col2.button("취소", key=f"{key_prefix}_cancel"):
+        _resume(session, False)
+
+
+def _render_multi_event_warning(session, decision, key_prefix) -> None:
+    payload = decision.payload
+    st.warning(f"[확인 필요] {payload['reason']}")
+    col1, col2 = st.columns(2)
+    if col1.button("계속 진행", key=f"{key_prefix}_proceed"):
+        _resume(session, True)
+    if col2.button("취소", key=f"{key_prefix}_cancel"):
         _resume(session, False)
 
 
@@ -294,9 +312,10 @@ _DECISION_RENDERERS = {
     "entity_category_and_name": _render_entity_category_and_name,
     "entity_terminal_status": _render_entity_terminal_status,
     "entity_required_field": _render_entity_required_field,
+    "multi_event_warning": _render_multi_event_warning,
     "hard_check_warning": _render_hard_check_warning,
     "rag_judgment": _render_rag_judgment,
-    "diff_item": _render_diff_item,
+    "diff_review": _render_diff_review,
 }
 
 
@@ -379,25 +398,63 @@ def render_dictionary_mode() -> None:
 # Entity detail — field editor + related-context review (Track A + Track B)
 # ---------------------------------------------------------------------------
 
-def render_entity_detail(entity_id: str) -> None:
-    category = schema.category_from_id(entity_id)
-    if category is None:
-        st.error(f"알 수 없는 entity_id입니다: {entity_id}")
-        return
-    entity = storage.get_entity(category, entity_id)
-    if entity is None:
-        st.error(f"존재하지 않는 엔티티입니다: {entity_id}")
+_EVENT_POINTER_CATEGORIES = ("character", "location", "faction", "artifact", "race")
+
+
+def _render_current_state_section(entity_id: str) -> None:
+    """get_current_state over every status_effects.yaml id — Phase 10
+    replaces the old active_status_effects-field display with a live query
+    against this entity's duration events."""
+    active = []
+    for s in schema.load_status_effects():
+        if storage.get_current_state(entity_id, s["id"]):
+            active.append(s["label"])
+    st.subheader("현재 상태")
+    st.write(", ".join(active) if active else "활성 상태 없음")
+
+
+def _render_related_events_section(entity_id: str) -> None:
+    """Always-visible full listing (Phase 10 patch section 8) — replaces
+    the old field-specific "관련 기록 검색" button; event_ids is exact and
+    complete, so there's no ranking step left to gate behind a click."""
+    st.subheader("관련 이벤트")
+    related_docs = field_update.find_related_context(entity_id)
+    if not related_docs:
+        st.write("관련 이벤트가 없습니다.")
         return
 
-    st.header(f"{entity.get('name') or entity_id} ({entity_id})")
-    if st.button("← 목록으로", key="detail_back"):
-        _navigate_to_entity(None)
+    for doc in related_docs:
+        doc_key = f"detail_flag_{entity_id}_{doc.entity_id}"
+        col1, col2 = st.columns([1, 8])
+        checked = col1.checkbox("플래그", key=f"{doc_key}_check")
+        col2.write(f"{doc.relevance_rank}. **{doc.entity_id}** ({doc.source}: {doc.relation})")
+        col2.caption(doc.text)
+        if checked:
+            reason = col2.text_input("사유 (선택)", key=f"{doc_key}_reason")
+            st.session_state.detail_flag_selection[doc.entity_id] = reason
+        else:
+            st.session_state.detail_flag_selection.pop(doc.entity_id, None)
+
+    if st.button("선택한 이벤트 플래그 저장", key="detail_flag_submit"):
+        for flagged_id, reason in st.session_state.detail_flag_selection.items():
+            flags.add_flag(flagged_id, f"{entity_id} 상세 화면에서 발견", reason or None)
+        st.session_state.detail_flag_selection = {}
+        st.success("플래그가 저장되었습니다.")
         st.rerun()
 
-    st.subheader("현재 필드 값")
-    st.json(entity)
+    with st.expander(f"이벤트 삭제 ({len(related_docs)}건)"):
+        for doc in related_docs:
+            if st.button(f"{doc.entity_id} 삭제", key=f"delete_event_{doc.entity_id}"):
+                result = deletion.delete_event(doc.entity_id)
+                message = f"{result.deleted_id} 삭제 완료."
+                if result.affected_entities:
+                    message += " 영향받은 엔티티: " + ", ".join(result.affected_entities)
+                st.success(message)
+                st.rerun()
 
-    field_defs = schema.get_fields(category)
+
+def _render_field_editor_section(category: str, entity_id: str, entity: dict) -> None:
+    field_defs = [f for f in schema.get_fields(category) if f["name"] != "event_ids"]
     field_names = [f["name"] for f in field_defs]
 
     st.subheader("필드 수정")
@@ -409,33 +466,19 @@ def render_entity_detail(entity_id: str) -> None:
         st.session_state.detail_previous_value = entity.get(selected_field)
         st.session_state.detail_searched = False
         st.session_state.detail_conflicts = []
-        st.session_state.detail_related_docs = []
-        st.session_state.detail_flag_selection = {}
 
     field_def = next(f for f in field_defs if f["name"] == selected_field)
-
-    if selected_field == "active_status_effects":
-        # System-managed (archivist writes {"status","start_year","end_year"}
-        # range dicts here) — not safe to free-edit as a comma list, so this
-        # is display-only until there's a dedicated range editor.
-        st.json(entity.get(selected_field) or [])
-        st.caption("이 필드는 사건 처리 파이프라인이 자동으로 관리합니다 (직접 편집 불가).")
-        return
-
     new_value = _render_value_field(
         field_def, entity.get(selected_field), key=f"detail_value_{entity_id}_{selected_field}"
     )
 
-    if st.button("관련 기록 검색", key="detail_search"):
+    if st.button("필드 값 검토", key="detail_search"):
         structured = field_update.is_structured_field(category, selected_field)
         if structured:
             storage.save_entity(category, entity_id, {selected_field: new_value})
             st.session_state.detail_conflicts = hard_check.run_hard_checks(category, entity_id)
         else:
             st.session_state.detail_conflicts = []
-        st.session_state.detail_related_docs = field_update.find_related_context(
-            entity_id, selected_field, new_value
-        )
         st.session_state.detail_new_value = new_value
         st.session_state.detail_searched = True
         st.rerun()
@@ -454,45 +497,74 @@ def render_entity_detail(entity_id: str) -> None:
     for c in warnings:
         st.warning(f"[{c.check_type}] {c.entity_id}: {c.reason}")
 
-    st.subheader("관련 기록")
-    related_docs = st.session_state.detail_related_docs
-    if not related_docs:
-        st.write("관련 기록이 없습니다.")
-    else:
-        for doc in related_docs:
-            doc_key = f"detail_flag_{entity_id}_{selected_field}_{doc.entity_id}"
-            col1, col2 = st.columns([1, 8])
-            checked = col1.checkbox("플래그", key=f"{doc_key}_check")
-            col2.write(f"{doc.relevance_rank}. **{doc.entity_id}** ({doc.source}: {doc.relation})")
-            col2.caption(doc.text)
-            if checked:
-                reason = col2.text_input("사유 (선택)", key=f"{doc_key}_reason")
-                st.session_state.detail_flag_selection[doc.entity_id] = reason
-            else:
-                st.session_state.detail_flag_selection.pop(doc.entity_id, None)
-
     if st.button("저장", key="detail_save", disabled=bool(blocking)):
         if not field_update.is_structured_field(category, selected_field):
             storage.save_entity(category, entity_id, {selected_field: st.session_state.detail_new_value})
         if any(c.check_type == "lifespan" for c in warnings):
             storage.save_entity("character", entity_id, {"lifespan_check_ack": True})
 
-        for flagged_entity_id, reason in st.session_state.detail_flag_selection.items():
-            flags.add_flag(
-                flagged_entity_id, f"{entity_id}의 {selected_field} 수정 중 발견", reason or None
-            )
-
-        cleared = flags.clear_flags_for_entity(entity_id)
-        message = "저장 완료."
-        if cleared:
-            message += f" 이 엔티티에 걸려있던 플래그 {cleared}건이 자동 해제되었습니다."
-        st.success(message)
-
+        st.success("저장 완료.")
         st.session_state.detail_searched = False
         st.session_state.detail_conflicts = []
-        st.session_state.detail_related_docs = []
-        st.session_state.detail_flag_selection = {}
         st.rerun()
+
+
+def _render_delete_entity_section(category: str, entity_id: str) -> None:
+    st.subheader("엔티티 삭제")
+    if not st.session_state.detail_confirm_delete:
+        if st.button("이 엔티티 삭제", key="detail_delete_start"):
+            st.session_state.detail_confirm_delete = True
+            st.rerun()
+        return
+
+    events = deletion.request_entity_deletion(entity_id)
+    if events:
+        st.write(f"이 엔티티가 관여한 이벤트 {len(events)}건도 함께 정리됩니다 (다른 엔티티가 "
+                 f"관여하지 않은 이벤트는 삭제, 관여했다면 이 엔티티의 포인터만 제거):")
+        for record in events:
+            st.write(f"- {record['id']}: {record.get('notes') or ''}")
+
+    col1, col2 = st.columns(2)
+    if col1.button("그대로 삭제 진행", key="detail_delete_confirm"):
+        result = deletion.delete_entity(entity_id, category)
+        st.session_state.detail_confirm_delete = False
+        _navigate_to_entity(None)
+        message = f"{result.deleted_id} 삭제 완료."
+        if result.deleted_events:
+            message += f" 함께 삭제된 이벤트: {', '.join(result.deleted_events)}."
+        if result.affected_entities:
+            message += f" 포인터가 갱신된 엔티티: {', '.join(result.affected_entities)}."
+        st.success(message)
+        st.rerun()
+    if col2.button("취소 (유지)", key="detail_delete_cancel"):
+        st.session_state.detail_confirm_delete = False
+        st.rerun()
+
+
+def render_entity_detail(entity_id: str) -> None:
+    category = schema.category_from_id(entity_id)
+    if category is None:
+        st.error(f"알 수 없는 entity_id입니다: {entity_id}")
+        return
+    entity = storage.get_entity(category, entity_id)
+    if entity is None:
+        st.error(f"존재하지 않는 엔티티입니다: {entity_id}")
+        return
+
+    st.header(f"{entity.get('name') or entity_id} ({entity_id})")
+    if st.button("← 목록으로", key="detail_back"):
+        _navigate_to_entity(None)
+        st.rerun()
+
+    st.subheader("현재 필드 값")
+    st.json(entity)
+
+    if category in _EVENT_POINTER_CATEGORIES:
+        _render_current_state_section(entity_id)
+        _render_related_events_section(entity_id)
+
+    _render_field_editor_section(category, entity_id, entity)
+    _render_delete_entity_section(category, entity_id)
 
 
 # ---------------------------------------------------------------------------

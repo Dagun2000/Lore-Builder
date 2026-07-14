@@ -19,8 +19,7 @@ _CATEGORY_DESCRIPTIONS = {
     "artifact": "아이템/유물 — 무기, 보물 등 소지 가능한 물건",
     "race": "종족 — 인간, 엘프 등 생물학적 분류",
     "system": "세계관 규칙 — 마법 체계, 신성 법칙 등",
-    "timeline": "사건 — 특정 시점에 벌어진 일",
-    "relationship": "관계 — 두 엔티티 사이의 연결",
+    "timeline": "사건/시대 — 특정 시점에 벌어진 일이나 역사적 시기를 가리키는 고유명사",
 }
 _VALID_CATEGORIES = set(_CATEGORY_DESCRIPTIONS)
 

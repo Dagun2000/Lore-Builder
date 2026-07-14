@@ -8,7 +8,7 @@ def test_parse_input_extracts_year_and_tags():
 
     result = parser.parse_input(text)
 
-    assert result.year == 2100
+    assert result.years == [2100]
     assert result.tags == ["쟝", "검은 산양 여관"]
     assert result.raw_text == text
 

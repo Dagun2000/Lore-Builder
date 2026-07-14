@@ -7,6 +7,13 @@ followed by free-text body content used as the Chroma document.
 import sys
 from pathlib import Path
 
+# Windows consoles default stdout to the active code page (cp949 on Korean
+# Windows), not UTF-8 — the "seeded character/쟝" style progress lines would
+# otherwise come out as mojibake regardless of how correctly the seed files
+# themselves are encoded.
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 

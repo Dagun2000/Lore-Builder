@@ -156,118 +156,101 @@ def list_entities(category: str) -> list:
     return results
 
 
-def find_related_timeline_ids(entity_id: str) -> list:
-    """Timeline ids related to entity_id, via:
-    - timeline.location referencing entity_id directly
-    - relationship rows where entity_id is subject/object and the other
-      side is a timeline event (event_ prefix)
-    Shared traversal used by get_event_years (Phase 0) and
-    field_update.find_related_context (Phase 6) — extend here, not in
-    either caller, so the two never drift apart."""
-    conn = get_connection()
-    init_db(conn)
+def get_events_for_entity(entity_id: str) -> list:
+    """Every timeline record (point + duration, mixed) pointed at by
+    entity_id.event_ids, year-sorted — point events by `year`, duration
+    events by `start_year`. This is the single source of truth for "what's
+    related to this entity" (Phase 10's event-centric redesign): no separate
+    relationship table, no vector search, just the pointer list."""
+    category = category_from_id(entity_id)
+    if category is None:
+        return []
 
-    seen = set()
-    ids = []
+    entity = get_entity(category, entity_id)
+    if entity is None:
+        return []
 
-    for row in conn.execute(
-        'SELECT id FROM "timeline" WHERE location = ?', (entity_id,)
-    ):
-        if row["id"] not in seen:
-            seen.add(row["id"])
-            ids.append(row["id"])
+    records = []
+    for event_id in entity.get("event_ids") or []:
+        record = get_entity("timeline", event_id)
+        if record is not None:
+            records.append(record)
 
-    for row in conn.execute(
-        'SELECT subject, object FROM "relationship" WHERE subject = ? OR object = ?',
-        (entity_id, entity_id),
-    ):
-        other = row["object"] if row["subject"] == entity_id else row["subject"]
-        if other and other.startswith("event_") and other not in seen:
-            event_row = conn.execute(
-                'SELECT id FROM "timeline" WHERE id = ?', (other,)
-            ).fetchone()
-            if event_row:
-                seen.add(event_row["id"])
-                ids.append(event_row["id"])
-
-    conn.close()
-    return ids
+    records.sort(key=lambda r: r["year"] if r.get("year") is not None else (r.get("start_year") or 0))
+    return records
 
 
 def get_event_years(entity_id: str) -> list:
-    """Years of every timeline record related to entity_id (see
-    find_related_timeline_ids for how "related" is determined)."""
-    ids = find_related_timeline_ids(entity_id)
-    if not ids:
-        return []
-
-    conn = get_connection()
-    init_db(conn)
-
-    placeholders = ", ".join("?" for _ in ids)
-    years = {
-        row["year"]
-        for row in conn.execute(
-            f'SELECT year FROM "timeline" WHERE id IN ({placeholders})', ids
-        )
-        if row["year"] is not None
-    }
-
-    conn.close()
+    """Every year entity_id is on record for — a point event's `year`, or a
+    duration event's `start_year`/`end_year` (both count: hard_check's
+    terminal/lifespan checks care about the full span an entity is attested
+    across, not just when a status began)."""
+    years = set()
+    for record in get_events_for_entity(entity_id):
+        if record.get("year") is not None:
+            years.add(record["year"])
+        if record.get("start_year") is not None:
+            years.add(record["start_year"])
+        if record.get("end_year") is not None:
+            years.add(record["end_year"])
     return sorted(years)
 
 
-def get_status_effects(entity_id: str) -> list:
-    """Status ids currently open (no end_year yet) for entity_id — "what's
-    active right now", independent of any particular event's year.
-
-    This reads the entity's `active_status_effects` snapshot field — the
-    single source of truth for "what status is active", kept in sync by
-    archivist.build_diff's update ChangeItems (Phase 4). Do not reintroduce a
-    timeline/relationship history scan here: relationships are an
-    append-only log with no "resolved" flag, so a scan can never tell a
-    cleared status from an active one and would drift from what was
-    actually saved.
-
-    Since Phase 9's status-range patch, each entry is
-    {"status": id, "start_year": int, "end_year": int | None} rather than a
-    bare status id — see get_active_statuses_at for the year-bounded variant
-    Step 4 needs to avoid firing on events that predate a status entirely."""
-    category = category_from_id(entity_id)
-    if category is None:
-        return []
-
-    entity = get_entity(category, entity_id)
-    if entity is None:
-        return []
-
-    ranges = entity.get("active_status_effects") or []
-    return [r["status"] for r in ranges if r.get("end_year") is None]
-
-
-def get_active_statuses_at(entity_id: str, year: int) -> list:
-    """Status ids that were active specifically at `year`: start_year <= year
-    and (end_year is None or year <= end_year). Lets check_status_consistency
-    skip its LLM call entirely for an event whose year falls outside every
-    status window on this entity, instead of firing on every single event
-    that touches the entity regardless of whether the status had even begun
-    (or had already ended) by that point."""
-    category = category_from_id(entity_id)
-    if category is None:
-        return []
-
-    entity = get_entity(category, entity_id)
-    if entity is None:
-        return []
-
-    ranges = entity.get("active_status_effects") or []
-    return [
-        r["status"]
-        for r in ranges
+def get_duration_records(entity_id: str, predicate: str | None = None) -> list:
+    """Duration-event records where entity_id is the `entity` or the
+    `target` side, optionally filtered to one predicate. Sourced from
+    entity_id.event_ids (not a raw table scan) so this never drifts from
+    what get_events_for_entity/get_event_years already see."""
+    records = [
+        r
+        for r in get_events_for_entity(entity_id)
         if r.get("start_year") is not None
-        and r["start_year"] <= year
-        and (r.get("end_year") is None or year <= r["end_year"])
+        and (r.get("entity") == entity_id or r.get("target") == entity_id)
     ]
+    if predicate is not None:
+        records = [r for r in records if r.get("predicate") == predicate]
+    return records
+
+
+def get_current_state(entity_id: str, predicate: str, year: int | None = None) -> list:
+    """Targets of entity_id's `predicate` duration records that are active
+    at `year` (or, if `year` is omitted, still open — end_year is None).
+    For a personal status (no target, e.g. predicate="imprisoned"), the
+    returned list still holds one `None` entry per active record — check
+    truthiness (`if get_current_state(...):`) to answer "is this active"."""
+    active_targets = []
+    for record in get_duration_records(entity_id, predicate):
+        if record.get("entity") != entity_id:
+            continue
+        start = record["start_year"]
+        end = record.get("end_year")
+        is_active = (end is None) if year is None else (start <= year and (end is None or year <= end))
+        if is_active:
+            active_targets.append(record.get("target"))
+    return active_targets
+
+
+def add_event_pointer(entity_id: str, event_id: str) -> None:
+    """Add event_id to entity_id.event_ids, deduped."""
+    category = category_from_id(entity_id)
+    if category is None:
+        return
+    entity = get_entity(category, entity_id) or {}
+    current = list(entity.get("event_ids") or [])
+    if event_id not in current:
+        current.append(event_id)
+        save_entity(category, entity_id, {"event_ids": current})
+
+
+def remove_event_pointer(entity_id: str, event_id: str) -> None:
+    """Remove event_id from entity_id.event_ids, if present."""
+    category = category_from_id(entity_id)
+    if category is None:
+        return
+    entity = get_entity(category, entity_id) or {}
+    current = list(entity.get("event_ids") or [])
+    if event_id in current:
+        save_entity(category, entity_id, {"event_ids": [e for e in current if e != event_id]})
 
 
 # ---------------------------------------------------------------------------
@@ -318,3 +301,47 @@ def query_chroma(query_text: str, top_k: int = 3, ids: list | None = None) -> di
         kwargs["ids"] = filtered_ids
         kwargs["n_results"] = min(top_k, len(filtered_ids))
     return collection.query(**kwargs)
+
+
+def delete_from_chroma(entity_id: str) -> None:
+    collection = get_chroma_collection()
+    existing = set(collection.get(ids=[entity_id])["ids"])
+    if entity_id in existing:
+        collection.delete(ids=[entity_id])
+
+
+# ---------------------------------------------------------------------------
+# Deletion (Phase 10) — SQLite row + Chroma doc, always together
+# ---------------------------------------------------------------------------
+
+def delete_row(category: str, entity_id: str) -> None:
+    conn = get_connection()
+    init_db(conn)
+    conn.execute(f'DELETE FROM "{category}" WHERE id = ?', (entity_id,))
+    conn.commit()
+    conn.close()
+
+
+def delete_entity_everywhere(category: str, entity_id: str) -> None:
+    """Remove entity_id's row from SQLite and its document from Chroma —
+    the two stores are always deleted together, never one without the
+    other (mirrors save_entity/save_to_chroma always being called as a
+    pair when something is created)."""
+    delete_row(category, entity_id)
+    delete_from_chroma(entity_id)
+
+
+_EVENT_POINTER_CATEGORIES = ("character", "location", "faction", "artifact", "race")
+
+
+def find_entities_referencing_event(event_id: str) -> list:
+    """[(category, entity_id), ...] for every entity whose event_ids
+    contains event_id — a plain scan across the categories that carry
+    event_ids at all, rather than a separate reverse-index table; there are
+    only a handful of entities per category in practice, so this is cheap."""
+    matches = []
+    for category in _EVENT_POINTER_CATEGORIES:
+        for entity in list_entities(category):
+            if event_id in (entity.get("event_ids") or []):
+                matches.append((category, entity["id"]))
+    return matches

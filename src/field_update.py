@@ -1,18 +1,18 @@
-"""Existing-entity field update — Phase 6.
+"""Existing-entity field update — Phase 6, Track B rewritten in Phase 10.
 
-Deliberately separate from Phase 3's rag_check.py: everything here is pure
-retrieval + ranking, never an LLM contradiction judgment. Whether a related
-record actually conflicts with the new value is left entirely to the human
+Deliberately separate from Step 4's rag_check.py: everything here is pure
+retrieval, never an LLM contradiction judgment. Whether a related record
+actually conflicts with the new value is left entirely to the human
 reviewing update_field_flow's output — see the module docstring in
 rag_check.py if this distinction matters for a future change.
 
 Two independent tracks, both triggered by update_field_flow, never just one:
   - Track A (update_structured_field): re-runs Phase 1's hard_check on any
     field Phase 1 already reasons about, reusing Phase 5's approval loop.
-  - Track B (find_related_context): full-recall search over every
-    relationship/timeline record touching the entity, ranked (not filtered)
-    by similarity to the new value via Chroma — always runs, regardless of
-    field type.
+  - Track B (find_related_context): every event entity_id.event_ids points
+    at — Phase 10 retired the relationship table + Chroma-similarity search
+    this used to run; event_ids is now the complete, exact list of what's
+    related, so there's nothing left to rank by similarity for.
 """
 
 from dataclasses import dataclass
@@ -31,11 +31,11 @@ _STRUCTURED_FIELD_OVERRIDES = {
 
 @dataclass
 class RelatedDoc:
-    entity_id: str
-    source: str  # "relationship" | "timeline"
-    relation: str
+    entity_id: str  # always a timeline (event_) id — Phase 10
+    source: str  # "point" | "duration"
+    relation: str  # duration's predicate, or "event" for a point record
     text: str
-    relevance_rank: int
+    relevance_rank: int  # chronological position (1 = earliest); not a similarity score
 
 
 def _prompt(message: str) -> str:
@@ -82,118 +82,34 @@ def update_structured_field(entity_id: str, field_name: str, new_value):
 
 
 # ---------------------------------------------------------------------------
-# Track B — full-recall search + ranking, no LLM judgment
+# Track B — full recall via event_ids, no ranking, no LLM judgment
 # ---------------------------------------------------------------------------
 
-def _gather_relationship_docs(entity_id: str) -> list:
-    """Relationships whose counterpart is a real entity (not a timeline
-    event — those are handled by _gather_timeline_docs so a relationship
-    row pointing at an event_ isn't counted in both buckets)."""
-    conn = storage.get_connection()
-    storage.init_db(conn)
-
+def find_related_context(entity_id: str) -> list:
+    """Every event entity_id.event_ids points at, chronological — the
+    complete, exact list of what's related to this entity. Phase 10 retired
+    the old relationship-table-plus-Chroma-similarity-search version of this
+    function: event_ids already IS full recall, so there's nothing left to
+    search or rank by similarity for."""
+    records = storage.get_events_for_entity(entity_id)
     docs = []
-    for row in conn.execute(
-        'SELECT subject, predicate, object, notes FROM "relationship" '
-        'WHERE subject = ? OR object = ?',
-        (entity_id, entity_id),
-    ):
-        other = row["object"] if row["subject"] == entity_id else row["subject"]
-        if not other:
-            continue
-
-        other_category = schema.category_from_id(other)
-        if other_category is None or other_category == "timeline":
-            continue
-
-        other_entity = storage.get_entity(other_category, other)
-        counterpart_notes = (other_entity or {}).get("notes") or ""
-        relationship_notes = row["notes"] or ""
-        text = " ".join(t for t in (counterpart_notes, relationship_notes) if t)
-        if not text:
-            continue
-
+    for rank, record in enumerate(records, start=1):
+        if record.get("year") is not None:
+            source, relation, year_label = "point", "event", str(record["year"])
+        else:
+            source = "duration"
+            relation = record.get("predicate") or ""
+            end = record.get("end_year")
+            year_label = f"{record.get('start_year')}~{end if end is not None else '현재'}"
         docs.append(
             RelatedDoc(
-                entity_id=other,
-                source="relationship",
-                relation=row["predicate"],
-                text=text,
-                relevance_rank=-1,
+                entity_id=record["id"],
+                source=source,
+                relation=relation,
+                text=f"[{year_label}] {record.get('notes') or ''}".strip(),
+                relevance_rank=rank,
             )
         )
-
-    conn.close()
-    return docs
-
-
-def _gather_timeline_docs(entity_id: str) -> list:
-    docs = []
-    for event_id in storage.find_related_timeline_ids(entity_id):
-        event = storage.get_entity("timeline", event_id)
-        text = (event or {}).get("notes") or ""
-        if not text:
-            continue
-        docs.append(
-            RelatedDoc(
-                entity_id=event_id,
-                source="timeline",
-                relation="event",
-                text=text,
-                relevance_rank=-1,
-            )
-        )
-    return docs
-
-
-def _resolve_display_value(value) -> str:
-    """If `value` is itself an entity id (updating a reference-type field,
-    e.g. race/faction to another entity), use that entity's human-readable
-    `name` for the ranking query instead of the raw id. Verified this
-    matters: querying Chroma with the raw id "faction_mercenary_guild"
-    ranked the correct doc *last* of 4 candidates; querying with its name
-    "용병 길드" ranked it first — Chroma's default embedding model doesn't
-    treat snake_case/prefixed ids as meaningful tokens against Korean text."""
-    if not isinstance(value, str):
-        return str(value)
-    category = schema.category_from_id(value)
-    if category is None:
-        return value
-    entity = storage.get_entity(category, value)
-    if entity and entity.get("name"):
-        return entity["name"]
-    return value
-
-
-def find_related_context(entity_id: str, updated_field: str, new_value) -> list:
-    """Every relationship/timeline record touching entity_id, ranked by
-    similarity to the new value — full population, nothing dropped for
-    being low-ranked. No LLM call happens here.
-
-    The query is the (name-resolved) value suffixed with a generic Korean
-    connector ("{value} 관련" — "related to {value}"), not the raw English
-    `updated_field` name. Measured both matter: prefixing the raw field name
-    (e.g. "faction: 용병 길드") pushed the correct doc out of first place.
-    The bare value alone is also unreliable once two candidate docs share a
-    keyword unrelated to the actual question — e.g. querying "철왕국" alone
-    let a doc about char_mira living in the same city outrank the actual
-    faction-membership doc, because both mention "은빛도시". Appending "관련"
-    consistently fixed that without needing per-field Korean vocabulary."""
-    docs = _gather_relationship_docs(entity_id) + _gather_timeline_docs(entity_id)
-    if not docs:
-        return []
-
-    doc_ids = [d.entity_id for d in docs]
-    query_text = f"{_resolve_display_value(new_value)} 관련"
-    results = storage.query_chroma(query_text, top_k=len(doc_ids), ids=doc_ids)
-    ranked_ids = (results.get("ids") or [[]])[0]
-    order = {doc_id: i for i, doc_id in enumerate(ranked_ids)}
-    tail_rank = len(ranked_ids)
-
-    docs.sort(key=lambda d: order.get(d.entity_id, tail_rank))
-    for rank, doc in enumerate(docs, start=1):
-        doc.relevance_rank = rank
-
     return docs
 
 
@@ -276,7 +192,7 @@ def update_field_flow(entity_id: str, field_name: str, new_value) -> dict:
                 "flagged": [],
             }
 
-    related_docs = find_related_context(entity_id, field_name, new_value)
+    related_docs = find_related_context(entity_id)
 
     _print(f'[{entity_id}]의 {field_name}을(를) "{new_value}"(으)로 저장하려 합니다.')
     _print_related_context(related_docs)
