@@ -50,15 +50,30 @@ def generate_id(category: str, seed_text: str, existing_ids: set) -> str:
 
 
 def _next_active_status_effects(
-    entity_id: str, category: str, effect_id: str, action: str
+    entity_id: str, category: str, effect_id: str, action: str, year: int
 ) -> list:
+    """Each entry is {"status": id, "start_year": int, "end_year": int|None}
+    (Phase 9 status-range patch — was a bare status-id list before). "set"
+    opens a new range at `year` unless one's already open; "clear" closes
+    the open range for that status at `year` (closing the most recently
+    opened one if more than one is somehow open — that shouldn't normally
+    happen, but this keeps clear() well-defined either way)."""
     entity = storage.get_entity(category, entity_id) or {}
-    current = list(entity.get("active_status_effects") or [])
+    current = [dict(r) for r in (entity.get("active_status_effects") or [])]
 
-    if action == "set" and effect_id not in current:
-        current.append(effect_id)
+    if action == "set":
+        already_open = any(
+            r["status"] == effect_id and r.get("end_year") is None for r in current
+        )
+        if not already_open:
+            current.append({"status": effect_id, "start_year": year, "end_year": None})
     elif action == "clear":
-        current = [e for e in current if e != effect_id]
+        open_ranges = [
+            r for r in current if r["status"] == effect_id and r.get("end_year") is None
+        ]
+        if open_ranges:
+            target = max(open_ranges, key=lambda r: r["start_year"])
+            target["end_year"] = year
 
     return current
 
@@ -139,7 +154,8 @@ def build_diff(
         status_category = schema.category_from_id(status_entity)
         if status_category in _STATUS_BEARING_CATEGORIES:
             new_effects = _next_active_status_effects(
-                status_entity, status_category, status_effect_id, status_action
+                status_entity, status_category, status_effect_id, status_action,
+                parsed_input.year,
             )
             verb = "해제" if status_action == "clear" else "부여"
             changes.append(

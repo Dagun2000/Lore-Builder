@@ -31,13 +31,49 @@ CREATE_NEW = "신규 생성"  # sentinel entity_candidates response: build a new
 
 _STAGE_BY_DECISION = {
     "entity_candidates": "resolving_entities",
-    "entity_name": "resolving_entities",
+    "entity_category_and_name": "resolving_entities",
     "entity_terminal_status": "resolving_entities",
     "entity_required_field": "resolving_entities",
     "hard_check_warning": "hard_checking",
     "rag_judgment": "rag_checking",
     "diff_item": "reviewing_diff",
 }
+
+# Fields never offered on the new-entity confirm/edit screens: name has its
+# own dedicated step, and active_status_effects is system-managed (archivist
+# writes {"status", "start_year", "end_year"} range dicts to it — a raw
+# comma-separated form value would corrupt that shape).
+_NOT_EDITABLE_ON_CREATE = {"name", "active_status_effects"}
+
+
+class EntityCreationCancelled(Exception):
+    """Raised when the user picks "취소" on the new-entity confirmation
+    screen (Phase 9 patch A) — unwinds all the way out of _pipeline_generator
+    via the yield-from chain, since cancelling entity creation means this
+    whole input can't be processed, not just this one tag."""
+
+    def __init__(self, tag: str):
+        super().__init__(tag)
+        self.tag = tag
+
+
+def _field_defs_for_widget(category: str) -> list:
+    """Full field-def payload (name/type/required/options/ref_category) for
+    every field in `category` that the new-entity edit screen and the
+    entity-detail edit screen can both render with the same widget-mapping
+    logic (Phase 9 patch B) — reference -> selectbox of existing entities,
+    enum -> selectbox of schema options, everything else by primitive type."""
+    return [
+        {
+            "name": f["name"],
+            "type": f["type"],
+            "required": bool(f.get("required")),
+            "options": f.get("options"),
+            "ref_category": f.get("ref_category"),
+        }
+        for f in schema.get_fields(category)
+        if f["name"] not in _NOT_EDITABLE_ON_CREATE
+    ]
 
 _SESSIONS: dict = {}
 
@@ -69,18 +105,59 @@ class PipelineSession:
 # Generator equivalents of mapping.py's interactive helpers
 # ---------------------------------------------------------------------------
 
-def _create_new_entity_gen(session: PipelineSession, category: str, tag: str, context_sentence: str, year: int):
-    fields = {}
-    field_names = {f["name"] for f in schema.get_fields(category)}
+def _create_new_entity_gen(
+    session: PipelineSession, inferred_category: str, tag: str, context_sentence: str, year: int
+):
+    """Phase 9 patch A: category is confirmed (or corrected) up front,
+    together with the name, before anything else — misclassifying the
+    *category* (e.g. a person mistaken for an item) was the real risk, not
+    the name, which the LLM rarely gets wrong. "저장 후 계속" commits
+    category+name only, leaving every other field blank; "편집" continues
+    into the full field form (required forced, optional included); "취소"
+    aborts the whole input via EntityCreationCancelled."""
+    category = inferred_category
 
-    if "name" in field_names:
-        name_response = yield PendingDecision(
-            "entity_name", {"category": category, "tag": tag, "default": tag}, {"tag": tag}
+    while True:
+        field_names = {f["name"] for f in schema.get_fields(category)}
+        has_name_field = "name" in field_names
+
+        response = yield PendingDecision(
+            "entity_category_and_name",
+            {
+                "tag": tag,
+                "inferred_category": inferred_category,
+                "categories": schema.list_categories(),
+                "has_name_field": has_name_field,
+                "default_name": tag,
+            },
+            {"tag": tag},
         )
-        fields["name"] = name_response if name_response else tag
+        response = response or {}
+        category = response.get("category") or category
+        action = response.get("action")
+
+        if action == "cancel":
+            raise EntityCreationCancelled(tag)
+        if action in ("save", "edit"):
+            break
+        # Anything unrecognized (e.g. a stray empty response): re-show the
+        # same confirmation rather than silently guessing an action.
+
+    field_names = {f["name"] for f in schema.get_fields(category)}
+    fields = {}
+    if "name" in field_names:
+        fields["name"] = response.get("name") or tag
 
     entity_id = mapping.generate_entity_id(category, fields.get("name", tag))
 
+    if action == "save":
+        storage.save_entity(category, entity_id, fields)
+        storage.save_to_chroma(entity_id, context_sentence, {"category": category, "tag": tag})
+        return entity_id
+
+    # action == "edit": full field form below (required forced, optional
+    # included) — this is the only path that still asks about terminal
+    # status, since that too is a form of "editing" the new character.
     if category == "character" and mapping.infer_terminal_status(context_sentence):
         answer = yield PendingDecision(
             "entity_terminal_status",
@@ -93,31 +170,33 @@ def _create_new_entity_gen(session: PipelineSession, category: str, tag: str, co
             fields.update(answer.get("수정") or {})
         # "아니오" (or anything else unrecognized): no death_year set.
 
-    # Only required fields are ever a decision point here — optional-field
-    # free editing during creation is intentionally out of scope for Phase 8
-    # (not one of the enumerated decision_type values); it stays a CLI-only
-    # nicety in mapping._collect_fields, unused by this path.
-    required_fields = [
-        f for f in schema.get_required_fields(category) if fields.get(f["name"]) is None
+    editable_fields = [
+        f for f in _field_defs_for_widget(category) if fields.get(f["name"]) is None
     ]
-    while required_fields:
+    while editable_fields:
         response = yield PendingDecision(
             "entity_required_field",
-            {
-                "category": category,
-                "fields": [{"name": f["name"], "type": f["type"]} for f in required_fields],
-            },
+            {"category": category, "fields": editable_fields},
             {"tag": tag},
         )
         response = response or {}
         still_missing = []
-        for f in required_fields:
+        for f in editable_fields:
             raw_value = response.get(f["name"])
-            if raw_value in (None, ""):
-                still_missing.append(f)
+            if raw_value is None or raw_value == "" or raw_value == []:
+                if f["required"]:
+                    still_missing.append(f)
                 continue
-            fields[f["name"]] = schema.coerce_value(f, raw_value)
-        required_fields = still_missing
+            if isinstance(raw_value, str):
+                # CLI submits raw text for every field; coerce like any
+                # other typed-from-a-string entry point (schema.coerce_value).
+                field_def = next(fd for fd in schema.get_fields(category) if fd["name"] == f["name"])
+                fields[f["name"]] = schema.coerce_value(field_def, raw_value)
+            else:
+                # A GUI widget (checkbox/number_input/selectbox/...) already
+                # returns the correctly-typed Python value — use it as-is.
+                fields[f["name"]] = raw_value
+        editable_fields = still_missing
 
     storage.save_entity(category, entity_id, fields)
     storage.save_to_chroma(entity_id, context_sentence, {"category": category, "tag": tag})
@@ -241,7 +320,15 @@ def _pipeline_generator(session: PipelineSession):
 
     resolved_entities = {}
     for tag in parsed.tags:
-        entity_id = yield from _resolve_entity_gen(session, tag, parsed.raw_text, parsed.year)
+        try:
+            entity_id = yield from _resolve_entity_gen(session, tag, parsed.raw_text, parsed.year)
+        except EntityCreationCancelled as exc:
+            return {
+                "status": "cancelled",
+                "stage": "entity_resolution",
+                "tag": exc.tag,
+                "message": f"'{exc.tag}' 엔티티 생성이 취소되었습니다. 입력을 다시 작성해주세요.",
+            }
         resolved_entities[tag] = entity_id
         session.resolved_entities = dict(resolved_entities)
 
@@ -250,7 +337,9 @@ def _pipeline_generator(session: PipelineSession):
     )
     session.inferred_event = inferred_event
 
-    rag_judgments = rag_check.run_rag_checks(list(resolved_entities.values()), parsed.raw_text)
+    rag_judgments = rag_check.run_rag_checks(
+        list(resolved_entities.values()), parsed.raw_text, parsed.year
+    )
     session.rag_judgments = rag_judgments
 
     conflicts = []
@@ -258,7 +347,13 @@ def _pipeline_generator(session: PipelineSession):
         category = schema.category_from_id(entity_id)
         if category is None:
             continue
-        conflicts.extend(hard_check.run_hard_checks(category, entity_id, extra_years=[parsed.year]))
+        # Only entities the event implies were actually present/alive at
+        # parsed.year get that year injected as a hard-check constraint —
+        # see main.run_pipeline's identical comment for the "digging up a
+        # grave" vs "playing together" example this guards against.
+        is_present = inferred_event.entity_presence.get(entity_id, True)
+        extra_years = [parsed.year] if is_present else None
+        conflicts.extend(hard_check.run_hard_checks(category, entity_id, extra_years=extra_years))
     session.hard_check_conflicts = conflicts
 
     ok = yield from _review_hard_check_conflicts_gen(conflicts)

@@ -18,6 +18,7 @@ class InferredEvent:
     event_summary: str
     relationships: list = field(default_factory=list)
     status_effect: dict | None = None
+    entity_presence: dict = field(default_factory=dict)
 
 
 def _get_llm():
@@ -61,13 +62,22 @@ def infer_relationship_and_event(
         "{\n"
         '  "event_summary": "사건을 한 줄로 요약한 문장",\n'
         '  "relationships": [{"subject": "entity_id", "predicate": "관계/행동 서술어", "object": "entity_id"}],\n'
-        '  "status_effect": {"entity": "entity_id", "effect": "status_effect id", "action": "set 또는 clear"} 또는 null\n'
+        '  "status_effect": {"entity": "entity_id", "effect": "status_effect id", "action": "set 또는 clear"} 또는 null,\n'
+        '  "entity_presence": {"entity_id": true 또는 false, ...}\n'
         "}\n\n"
         f"status_effect.effect는 반드시 아래 목록의 id 중 하나여야 하며, 목록에 없는 값은 절대 "
         f"지어내지 마라:\n{status_effect_options}\n\n"
         "단순한 몸싸움이나 가벼운 사건만으로는 status_effect를 채우지 마라. 위 목록의 상태 중 "
         "하나가 명확하고 결정적으로 새로 부여되거나 해제되는 경우에만 채우고, 조금이라도 "
-        "애매하면 null로 두어라."
+        "애매하면 null로 두어라.\n\n"
+        "entity_presence: '사용 가능한 entity_id' 각각에 대해, 이 사건이 그 엔티티가 이 연도에 "
+        "실제로 살아있거나 존재/활동하고 있었음을 전제로 하는지(true) 아니면 이미 지나간 사실이나 "
+        "유산·기록물에 대한 참조일 뿐인지(false) 판단하라. 사건을 직접 행하는 주체는 거의 항상 "
+        "true다. 반대로 무덤, 유물, 과거 기록처럼 그 엔티티의 흔적만 다뤄지고 본인은 이 사건에 "
+        "실제로 등장/참여하지 않는 경우는 false다. 예: '[밥]이 [쟝]의 무덤을 파헤쳤다'에서 밥은 "
+        "true, 쟝은 false (쟝은 이미 죽었을 수 있는 과거의 흔적일 뿐 이 사건에 살아서 참여하지 "
+        "않음). '[데이비드]가 [쟝]과 놀았다'에서는 데이비드와 쟝 모두 true (둘 다 이 시점에 함께 "
+        "존재하며 상호작용함). 목록의 모든 entity_id에 대해 빠짐없이 판단하라."
     )
 
     last_error = None
@@ -79,6 +89,7 @@ def infer_relationship_and_event(
                 event_summary=data["event_summary"],
                 relationships=data.get("relationships") or [],
                 status_effect=data.get("status_effect"),
+                entity_presence=data.get("entity_presence") or {},
             )
         except (ValueError, KeyError) as exc:
             last_error = exc

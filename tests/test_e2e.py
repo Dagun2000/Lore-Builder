@@ -223,7 +223,7 @@ def test_escape_clears_imprisoned_status_automatically(monkeypatch):
         {
             "name": "가일",
             "birth_year": 2000,
-            "active_status_effects": ["imprisoned"],
+            "active_status_effects": [{"status": "imprisoned", "start_year": 2050, "end_year": None}],
             "notes": "가일은 용병 출신의 인물이다.",
         },
     )
@@ -251,7 +251,7 @@ def test_imprisoned_character_fighting_raises_conflict_popup(monkeypatch):
         {
             "name": "테오",
             "birth_year": 2000,
-            "active_status_effects": ["imprisoned"],
+            "active_status_effects": [{"status": "imprisoned", "start_year": 2050, "end_year": None}],
             "notes": "테오는 용병 출신의 인물이다.",
         },
     )

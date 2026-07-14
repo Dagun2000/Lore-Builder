@@ -84,7 +84,7 @@ def run_pipeline(user_input: str) -> dict:
     )
 
     rag_judgments = rag_check.run_rag_checks(
-        list(resolved_entities.values()), parsed.raw_text
+        list(resolved_entities.values()), parsed.raw_text, parsed.year
     )
 
     conflicts = []
@@ -92,8 +92,15 @@ def run_pipeline(user_input: str) -> dict:
         category = schema.category_from_id(entity_id)
         if category is None:
             continue
+        # Only entities the event implies were actually present/alive at
+        # parsed.year get that year injected as a hard-check constraint —
+        # e.g. digging up [쟝]'s grave shouldn't force 쟝 to have been alive
+        # for the dig's year, but playing together with [쟝] should. Default
+        # True (old behavior) if the LLM omitted this entity_id.
+        is_present = inferred_event.entity_presence.get(entity_id, True)
+        extra_years = [parsed.year] if is_present else None
         conflicts.extend(
-            hard_check.run_hard_checks(category, entity_id, extra_years=[parsed.year])
+            hard_check.run_hard_checks(category, entity_id, extra_years=extra_years)
         )
 
     if not approval.review_hard_check_conflicts(conflicts):
@@ -181,10 +188,28 @@ def _render_entity_candidates(payload: dict) -> str:
         _print("잘못된 번호입니다.")
 
 
-def _render_entity_name(payload: dict) -> str:
-    return _prompt(
-        f'이름 (기본값: "{payload["tag"]}", Enter로 그대로 사용, 다른 값 입력 시 변경): '
+def _render_entity_category_and_name(payload: dict) -> dict:
+    tag = payload["tag"]
+    categories = payload["categories"]
+    _print(f'"{tag}"을(를) [{payload["inferred_category"]}](으)로 분류했습니다. 맞습니까?')
+    for i, c in enumerate(categories, start=1):
+        _print(f"  {i}. {c}")
+    choice = _prompt(
+        f"카테고리 번호를 선택하세요 (Enter로 추천값 유지: {payload['inferred_category']}): "
     ).strip()
+    if choice.isdigit() and 1 <= int(choice) <= len(categories):
+        category = categories[int(choice) - 1]
+    else:
+        category = payload["inferred_category"]
+
+    name = None
+    if payload["has_name_field"]:
+        name = _prompt(f'이름 (기본값: "{payload["default_name"]}"): ').strip()
+
+    action_raw = _prompt("어떻게 진행할까요? [저장/편집/취소]: ").strip()
+    action = {"저장": "save", "편집": "edit", "취소": "cancel"}.get(action_raw, "edit")
+
+    return {"category": category, "name": name, "action": action}
 
 
 def _render_entity_terminal_status(payload: dict):
@@ -200,18 +225,26 @@ def _render_entity_terminal_status(payload: dict):
 
 
 def _render_entity_required_field(payload: dict) -> dict:
+    """Every field in the category except name (required forced, optional
+    skippable via Enter) — used both for the fast "저장 후 계속" path's
+    leftover-required-field retry and the full "편집" form. Reference/enum
+    values are just typed as raw text here (a real GUI renders these as
+    selectboxes instead — see app.py's shared widget helper for that)."""
     fields = payload["fields"]
-    names = ", ".join(f["name"] for f in fields)
-    _print(f"[{payload['category']}] 필수 필드: {names}")
+    _print(f"[{payload['category']}] 필드를 입력하세요 (필수 항목은 *, 비워둘 수 없음):")
 
     response = {}
     for f in fields:
+        marker = "*" if f["required"] else " "
+        hint = f" (선택: {', '.join(f['options'])})" if f["type"] == "enum" and f.get("options") else ""
         while True:
-            value = _prompt(f"{f['name']} 값 입력 (필수): ").strip()
+            value = _prompt(f"{marker} {f['name']}{hint}: ").strip()
             if value:
                 response[f["name"]] = value
                 break
-            _print("필수 필드는 비워둘 수 없습니다.")
+            if not f["required"]:
+                break
+            _print(f"'{f['name']}'은(는) 필수 필드라 비워둘 수 없습니다.")
     return response
 
 
@@ -235,7 +268,7 @@ def _render_diff_item(payload: dict, index: int, total: int) -> bool:
 
 _DECISION_RENDERERS = {
     "entity_candidates": _render_entity_candidates,
-    "entity_name": _render_entity_name,
+    "entity_category_and_name": _render_entity_category_and_name,
     "entity_terminal_status": _render_entity_terminal_status,
     "entity_required_field": _render_entity_required_field,
     "hard_check_warning": _render_hard_check_warning,
@@ -254,6 +287,8 @@ def _print_result(result: dict) -> None:
         _print("하드체크 결과에 따라 저장이 중단되었습니다.")
     elif status == "rejected" and result.get("stage") == "rag_check":
         _print("RAG 검증 결과에 따라 저장이 중단되었습니다.")
+    elif status == "cancelled":
+        _print(result.get("message", "취소되었습니다."))
     elif status == "no_changes":
         _print("승인된 변경사항이 없어 저장할 내용이 없습니다.")
     elif status == "saved":

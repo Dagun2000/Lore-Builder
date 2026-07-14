@@ -218,15 +218,21 @@ def get_event_years(entity_id: str) -> list:
 
 
 def get_status_effects(entity_id: str) -> list:
-    """Current active status_effect ids for entity_id.
+    """Status ids currently open (no end_year yet) for entity_id — "what's
+    active right now", independent of any particular event's year.
 
     This reads the entity's `active_status_effects` snapshot field — the
-    single source of truth for "what status is active now", kept in sync by
+    single source of truth for "what status is active", kept in sync by
     archivist.build_diff's update ChangeItems (Phase 4). Do not reintroduce a
     timeline/relationship history scan here: relationships are an
     append-only log with no "resolved" flag, so a scan can never tell a
     cleared status from an active one and would drift from what was
-    actually saved."""
+    actually saved.
+
+    Since Phase 9's status-range patch, each entry is
+    {"status": id, "start_year": int, "end_year": int | None} rather than a
+    bare status id — see get_active_statuses_at for the year-bounded variant
+    Step 4 needs to avoid firing on events that predate a status entirely."""
     category = category_from_id(entity_id)
     if category is None:
         return []
@@ -235,7 +241,33 @@ def get_status_effects(entity_id: str) -> list:
     if entity is None:
         return []
 
-    return list(entity.get("active_status_effects") or [])
+    ranges = entity.get("active_status_effects") or []
+    return [r["status"] for r in ranges if r.get("end_year") is None]
+
+
+def get_active_statuses_at(entity_id: str, year: int) -> list:
+    """Status ids that were active specifically at `year`: start_year <= year
+    and (end_year is None or year <= end_year). Lets check_status_consistency
+    skip its LLM call entirely for an event whose year falls outside every
+    status window on this entity, instead of firing on every single event
+    that touches the entity regardless of whether the status had even begun
+    (or had already ended) by that point."""
+    category = category_from_id(entity_id)
+    if category is None:
+        return []
+
+    entity = get_entity(category, entity_id)
+    if entity is None:
+        return []
+
+    ranges = entity.get("active_status_effects") or []
+    return [
+        r["status"]
+        for r in ranges
+        if r.get("start_year") is not None
+        and r["start_year"] <= year
+        and (r.get("end_year") is None or year <= r["end_year"])
+    ]
 
 
 # ---------------------------------------------------------------------------

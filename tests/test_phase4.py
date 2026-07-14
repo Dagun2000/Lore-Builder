@@ -70,7 +70,12 @@ def test_build_diff_status_clear_produces_character_update():
 
     assert len(character_updates) == 1
     assert character_updates[0].entity_id == "char_jang"
-    assert "imprisoned" not in character_updates[0].fields["active_status_effects"]
+    open_statuses = [
+        r["status"]
+        for r in character_updates[0].fields["active_status_effects"]
+        if r.get("end_year") is None
+    ]
+    assert "imprisoned" not in open_statuses
 
 
 def test_generate_id_avoids_collision():

@@ -1,4 +1,4 @@
-"""Lore Builder GUI — Phase 9 (Streamlit).
+"""Lore Builder GUI — Phase 9 (Streamlit) + Phase 9 통합 패치.
 
 Runs in-process, calling pipeline_session.py/field_update.py/flags.py
 directly — no separate API server. Sidebar has a permanent search box at
@@ -28,6 +28,7 @@ def _init_session_state() -> None:
         "chat_history": [],
         "session": None,
         "selected_entity": None,
+        "_last_mode": None,
         "detail_field_name": None,
         "detail_previous_value": None,
         "detail_searched": False,
@@ -69,7 +70,77 @@ def _navigate_to_entity(entity_id) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Chat mode — renders pipeline_session's 7 decision types
+# Shared field-widget helper (Phase 9 patch B) — used by both the
+# entity-detail field editor and the new-entity confirm/edit screen (patch
+# A), so a type only needs to be mapped to a widget once.
+# ---------------------------------------------------------------------------
+
+def _reference_options(ref_category: str) -> list:
+    """[(display_label, entity_id), ...] for a reference field's dropdown —
+    the only values ever offered are real, existing entities, which is what
+    keeps a free-text-typo from ever being saved into a reference field."""
+    if ref_category == "status_effect":
+        return [(f"{s['label']} ({s['id']})", s["id"]) for s in schema.load_status_effects()]
+
+    if ref_category == "any":
+        # relationship.subject/object can point at literally anything; no
+        # single category to pull from, so offer every named entity plus
+        # every timeline event by id.
+        options = []
+        for category in _NAME_BEARING_CATEGORIES:
+            for e in storage.list_entities(category):
+                options.append((f'{e.get("name") or e["id"]} ({e["id"]})', e["id"]))
+        for e in storage.list_entities("timeline"):
+            options.append((f'{e["id"]} ({e.get("year", "?")}년)', e["id"]))
+        return options
+
+    entities = storage.list_entities(ref_category)
+    if ref_category == "timeline":
+        return [(f'{e["id"]} ({e.get("year", "?")}년)', e["id"]) for e in entities]
+    return [(f'{e.get("name") or e["id"]} ({e["id"]})', e["id"]) for e in entities]
+
+
+def _render_value_field(field_def: dict, current_value, key: str, label: str | None = None):
+    """type -> widget, for every schema field type. `label` overrides the
+    on-screen caption (e.g. to add a required-field marker) without
+    affecting which dict key the caller stores the result under — always
+    use field_def["name"] for that, never the label."""
+    field_type = field_def["type"]
+    display_name = label if label is not None else field_def["name"]
+
+    if field_type == "reference":
+        options = _reference_options(field_def.get("ref_category"))
+        labels = [opt_label for opt_label, _id in options]
+        ids = [entity_id for _label, entity_id in options]
+        index = ids.index(current_value) + 1 if current_value in ids else 0
+        choice = st.selectbox(display_name, ["(비어있음)"] + labels, index=index, key=key)
+        return None if choice == "(비어있음)" else ids[labels.index(choice)]
+
+    if field_type == "enum":
+        options = field_def.get("options") or []
+        index = options.index(current_value) + 1 if current_value in options else 0
+        choice = st.selectbox(display_name, ["(비어있음)"] + options, index=index, key=key)
+        return None if choice == "(비어있음)" else choice
+
+    if field_type == "boolean":
+        return st.checkbox(display_name, value=bool(current_value), key=key)
+
+    if field_type == "integer":
+        # Streamlit's number_input always returns a real number (no "empty"
+        # state) — a required integer field can't be left blank here the
+        # way a text field can. Minor known gap, not worth a custom widget
+        # for; wrong values are still fixable afterward via the detail view.
+        return int(st.number_input(display_name, value=int(current_value or 0), step=1, key=key))
+
+    if field_type == "list":
+        raw = st.text_input(display_name, value=", ".join(current_value or []), key=key)
+        return [v.strip() for v in raw.split(",") if v.strip()]
+
+    return st.text_input(display_name, value=current_value or "", key=key)
+
+
+# ---------------------------------------------------------------------------
+# Chat mode — renders pipeline_session's decision types
 # ---------------------------------------------------------------------------
 
 def _resume(session, response) -> None:
@@ -81,6 +152,8 @@ def _describe_result(result: dict) -> str:
     status = result.get("status")
     if status == "error":
         return f"입력 오류: {result['message']}"
+    if status == "cancelled":
+        return result.get("message", "취소되었습니다.")
     if status == "rejected" and result.get("stage") == "hard_check":
         lines = ["하드체크 결과에 따라 저장이 중단되었습니다."]
         for c in result.get("conflicts", []):
@@ -110,13 +183,37 @@ def _render_entity_candidates(session, decision, key_prefix) -> None:
         _resume(session, pipeline_session.CREATE_NEW)
 
 
-def _render_entity_name(session, decision, key_prefix) -> None:
+def _render_entity_category_and_name(session, decision, key_prefix) -> None:
+    """Phase 9 patch A: category confirmation is the headline here, not the
+    name — a wrong category (person mistaken for an item) is the expensive
+    mistake; the LLM rarely gets the name wrong."""
     payload = decision.payload
-    value = st.text_input(
-        f'"{payload["tag"]}" 이름', value=payload["default"], key=f"{key_prefix}_name"
+    categories = payload["categories"]
+    st.write(
+        f'"{payload["tag"]}"을(를) **{payload["inferred_category"]}**(으)로 분류했습니다. 맞습니까?'
     )
-    if st.button("확인", key=f"{key_prefix}_name_confirm"):
-        _resume(session, value)
+    category = st.selectbox(
+        "카테고리",
+        categories,
+        index=categories.index(payload["inferred_category"]),
+        key=f"{key_prefix}_category",
+    )
+
+    name = None
+    # Re-derive has_name_field for whatever category is *currently selected*
+    # in the box, not just the originally-inferred one — switching category
+    # changes whether a name field even exists.
+    has_name_field = "name" in {f["name"] for f in schema.get_fields(category)}
+    if has_name_field:
+        name = st.text_input("이름", value=payload["default_name"], key=f"{key_prefix}_name")
+
+    col1, col2, col3 = st.columns(3)
+    if col1.button("저장 후 계속", key=f"{key_prefix}_save"):
+        _resume(session, {"category": category, "name": name, "action": "save"})
+    if col2.button("편집", key=f"{key_prefix}_edit"):
+        _resume(session, {"category": category, "name": name, "action": "edit"})
+    if col3.button("취소", key=f"{key_prefix}_cancel"):
+        _resume(session, {"category": category, "name": name, "action": "cancel"})
 
 
 def _render_entity_terminal_status(session, decision, key_prefix) -> None:
@@ -141,11 +238,17 @@ def _render_entity_terminal_status(session, decision, key_prefix) -> None:
 
 
 def _render_entity_required_field(session, decision, key_prefix) -> None:
+    """Full field form (required forced server-side, optional included) —
+    every field goes through the same type -> widget mapping as the
+    entity-detail editor (Phase 9 patch B)."""
     payload = decision.payload
-    st.write(f"[{payload['category']}] 필수 필드를 입력하세요:")
+    st.write(f"[{payload['category']}] 필드를 입력하세요 (필수 항목은 *):")
     values = {}
     for f in payload["fields"]:
-        values[f["name"]] = st.text_input(f["name"], key=f"{key_prefix}_{f['name']}")
+        label = f"{f['name']} *" if f["required"] else f["name"]
+        values[f["name"]] = _render_value_field(
+            f, None, key=f"{key_prefix}_{f['name']}", label=label
+        )
     if st.button("저장", key=f"{key_prefix}_submit"):
         _resume(session, values)
 
@@ -188,7 +291,7 @@ def _render_diff_item(session, decision, key_prefix) -> None:
 
 _DECISION_RENDERERS = {
     "entity_candidates": _render_entity_candidates,
-    "entity_name": _render_entity_name,
+    "entity_category_and_name": _render_entity_category_and_name,
     "entity_terminal_status": _render_entity_terminal_status,
     "entity_required_field": _render_entity_required_field,
     "hard_check_warning": _render_hard_check_warning,
@@ -276,62 +379,6 @@ def render_dictionary_mode() -> None:
 # Entity detail — field editor + related-context review (Track A + Track B)
 # ---------------------------------------------------------------------------
 
-def _reference_options(ref_category: str) -> list:
-    """[(display_label, entity_id), ...] for a reference field's dropdown —
-    the only values ever offered are real, existing entities, which is what
-    keeps a free-text-typo from ever being saved into a reference field."""
-    if ref_category == "status_effect":
-        return [(f"{s['label']} ({s['id']})", s["id"]) for s in schema.load_status_effects()]
-
-    if ref_category == "any":
-        # relationship.subject/object can point at literally anything; no
-        # single category to pull from, so offer every named entity plus
-        # every timeline event by id.
-        options = []
-        for category in _NAME_BEARING_CATEGORIES:
-            for e in storage.list_entities(category):
-                options.append((f'{e.get("name") or e["id"]} ({e["id"]})', e["id"]))
-        for e in storage.list_entities("timeline"):
-            options.append((f'{e["id"]} ({e.get("year", "?")}년)', e["id"]))
-        return options
-
-    entities = storage.list_entities(ref_category)
-    if ref_category == "timeline":
-        return [(f'{e["id"]} ({e.get("year", "?")}년)', e["id"]) for e in entities]
-    return [(f'{e.get("name") or e["id"]} ({e["id"]})', e["id"]) for e in entities]
-
-
-def _render_value_field(field_def: dict, current_value, key: str):
-    field_type = field_def["type"]
-    name = field_def["name"]
-
-    if field_type == "reference":
-        options = _reference_options(field_def.get("ref_category"))
-        labels = [label for label, _id in options]
-        ids = [entity_id for _label, entity_id in options]
-        index = ids.index(current_value) + 1 if current_value in ids else 0
-        choice = st.selectbox(name, ["(비어있음)"] + labels, index=index, key=key)
-        return None if choice == "(비어있음)" else ids[labels.index(choice)]
-
-    if field_type == "enum":
-        options = field_def.get("options", [])
-        index = options.index(current_value) + 1 if current_value in options else 0
-        choice = st.selectbox(name, ["(비어있음)"] + options, index=index, key=key)
-        return None if choice == "(비어있음)" else choice
-
-    if field_type == "boolean":
-        return st.checkbox(name, value=bool(current_value), key=key)
-
-    if field_type == "integer":
-        return int(st.number_input(name, value=int(current_value or 0), step=1, key=key))
-
-    if field_type == "list":
-        raw = st.text_input(name, value=", ".join(current_value or []), key=key)
-        return [v.strip() for v in raw.split(",") if v.strip()]
-
-    return st.text_input(name, value=current_value or "", key=key)
-
-
 def render_entity_detail(entity_id: str) -> None:
     category = schema.category_from_id(entity_id)
     if category is None:
@@ -366,6 +413,15 @@ def render_entity_detail(entity_id: str) -> None:
         st.session_state.detail_flag_selection = {}
 
     field_def = next(f for f in field_defs if f["name"] == selected_field)
+
+    if selected_field == "active_status_effects":
+        # System-managed (archivist writes {"status","start_year","end_year"}
+        # range dicts here) — not safe to free-edit as a comma list, so this
+        # is display-only until there's a dedicated range editor.
+        st.json(entity.get(selected_field) or [])
+        st.caption("이 필드는 사건 처리 파이프라인이 자동으로 관리합니다 (직접 편집 불가).")
+        return
+
     new_value = _render_value_field(
         field_def, entity.get(selected_field), key=f"detail_value_{entity_id}_{selected_field}"
     )
@@ -452,6 +508,16 @@ def main() -> None:
     st.sidebar.divider()
 
     mode = st.sidebar.radio("모드", ["채팅", "딕셔너리", "시각화"], key="mode")
+
+    # Phase 9 patch E: clicking a different mode tab must win over "an
+    # entity detail screen happens to be open" — previously the
+    # selected_entity check below ran unconditionally every rerun and never
+    # noticed the mode had changed, so switching tabs while viewing an
+    # entity did nothing until you clicked "← 목록으로" first.
+    if st.session_state._last_mode is not None and st.session_state._last_mode != mode:
+        _navigate_to_entity(None)
+    st.session_state._last_mode = mode
+
     if mode == "시각화":
         st.sidebar.caption("곧 추가 예정")
 

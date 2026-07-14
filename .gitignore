@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 
 chroma_store/
+chroma_store_test/
 db/**/*.md
 
 .env

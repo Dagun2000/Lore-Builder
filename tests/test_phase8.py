@@ -187,7 +187,7 @@ def test_escape_clears_imprisoned_status_automatically(monkeypatch):
         {
             "name": "브락스",
             "birth_year": 2000,
-            "active_status_effects": ["imprisoned"],
+            "active_status_effects": [{"status": "imprisoned", "start_year": 2050, "end_year": None}],
             "notes": "브락스는 용병 출신의 인물이다.",
         },
     )
@@ -208,7 +208,7 @@ def test_imprisoned_character_fighting_raises_conflict_popup(monkeypatch):
         {
             "name": "카인",
             "birth_year": 2000,
-            "active_status_effects": ["imprisoned"],
+            "active_status_effects": [{"status": "imprisoned", "start_year": 2050, "end_year": None}],
             "notes": "카인은 용병 출신의 인물이다.",
         },
     )
@@ -248,31 +248,94 @@ def test_magic_without_mana_stone_violates_world_rule(monkeypatch):
 # 2. State-machine-specific behavior, driven directly via pipeline_session.
 # ---------------------------------------------------------------------------
 
-def test_new_entity_pauses_for_name_before_anything_else():
+def test_new_entity_pauses_for_category_and_name_before_anything_else():
     session = pipeline_session.start_session("2100년, [파블로]가 몬스터와 싸우다가 죽었다.")
 
-    assert session.pending_decision.decision_type == "entity_name"
+    assert session.pending_decision.decision_type == "entity_category_and_name"
     assert session.pending_decision.payload["tag"] == "파블로"
+    assert session.pending_decision.payload["inferred_category"] == "character"
+    assert "character" in session.pending_decision.payload["categories"]
+    assert session.pending_decision.payload["has_name_field"] is True
 
 
-def test_entity_name_response_advances_to_terminal_status_for_character():
+def test_category_and_name_edit_advances_to_terminal_status_for_character():
     session = pipeline_session.start_session("2100년, [파블로]가 몬스터와 싸우다가 죽었다.")
-    session = pipeline_session.resume_session(session.session_id, "")
+    session = pipeline_session.resume_session(
+        session.session_id, {"category": None, "name": "파블로", "action": "edit"}
+    )
 
     assert session.pending_decision.decision_type == "entity_terminal_status"
     assert session.pending_decision.payload["tag"] == "파블로"
 
 
-def test_entity_name_response_advances_to_required_field_for_non_character():
-    session = pipeline_session.start_session("2100년, [그림자단]이라는 새로운 세력이 등장했다.")
-    assert session.pending_decision.decision_type == "entity_name"
+def test_category_override_changes_the_field_set_offered_next():
+    # Patch A completion criterion 2: switching the category in the combobox
+    # must recompute the field set for the *new* category, not the LLM's.
+    session = pipeline_session.start_session("2100년, [파블로]가 몬스터와 싸우다가 죽었다.")
+    assert session.pending_decision.payload["inferred_category"] == "character"
 
-    session = pipeline_session.resume_session(session.session_id, "")
+    session = pipeline_session.resume_session(
+        session.session_id, {"category": "faction", "name": "파블로", "action": "edit"}
+    )
 
     assert session.pending_decision.decision_type == "entity_required_field"
     assert session.pending_decision.payload["category"] == "faction"
     field_names = {f["name"] for f in session.pending_decision.payload["fields"]}
-    assert "category" in field_names
+    assert "category" in field_names  # faction.category, required
+    assert "birth_year" not in field_names  # character-only field must be gone
+
+
+def test_save_and_continue_leaves_remaining_fields_blank():
+    # Patch A completion criterion 3.
+    session = pipeline_session.start_session("2100년, [그림자단]이라는 새로운 세력이 등장했다.")
+    assert session.pending_decision.decision_type == "entity_category_and_name"
+    assert session.pending_decision.payload["inferred_category"] == "faction"
+
+    session = pipeline_session.resume_session(
+        session.session_id, {"category": None, "name": "그림자단", "action": "save"}
+    )
+
+    while session.pending_decision is not None:
+        dt = session.pending_decision.decision_type
+        assert dt != "entity_required_field"  # fast path must never ask for more
+        response = "그래도 저장" if dt in ("hard_check_warning", "rag_judgment") else True
+        session = pipeline_session.resume_session(session.session_id, response)
+
+    assert session.stage == "done"
+    entity_id = session.result["resolved_entities"]["그림자단"]
+    entity = storage.get_entity("faction", entity_id)
+    assert entity["name"] == "그림자단"
+    assert entity.get("category") is None
+
+
+def test_edit_reveals_full_field_form_for_non_character():
+    # Patch A completion criterion 4 (required forced, optional included).
+    session = pipeline_session.start_session("2100년, [블랙로터스]라는 새로운 세력이 등장했다.")
+    assert session.pending_decision.decision_type == "entity_category_and_name"
+
+    session = pipeline_session.resume_session(
+        session.session_id, {"category": None, "name": "블랙로터스", "action": "edit"}
+    )
+
+    assert session.pending_decision.decision_type == "entity_required_field"
+    assert session.pending_decision.payload["category"] == "faction"
+    fields_by_name = {f["name"]: f for f in session.pending_decision.payload["fields"]}
+    assert fields_by_name["category"]["required"] is True
+    assert "territory" in fields_by_name  # optional, still offered in "edit"
+    assert fields_by_name["territory"]["required"] is False
+
+
+def test_cancel_entity_creation_aborts_whole_input():
+    session = pipeline_session.start_session("2100년, [무명인]이 시장에 나타났다.")
+    assert session.pending_decision.decision_type == "entity_category_and_name"
+
+    session = pipeline_session.resume_session(
+        session.session_id, {"category": None, "name": "무명인", "action": "cancel"}
+    )
+
+    assert session.pending_decision is None
+    assert session.stage == "aborted"
+    assert session.result["status"] == "cancelled"
 
 
 def test_duplicate_exact_name_pauses_for_candidate_selection():
@@ -320,12 +383,16 @@ def test_diff_items_are_resumed_one_at_a_time():
         dt = session.pending_decision.decision_type
         if dt == "entity_candidates":
             response = session.pending_decision.payload["candidates"][0]
-        elif dt == "entity_name":
-            response = ""
+        elif dt == "entity_category_and_name":
+            response = {"category": None, "name": None, "action": "edit"}
         elif dt == "entity_terminal_status":
             response = "아니오"
         elif dt == "entity_required_field":
-            response = {f["name"]: "미상" for f in session.pending_decision.payload["fields"]}
+            response = {
+                f["name"]: "미상"
+                for f in session.pending_decision.payload["fields"]
+                if f["required"]
+            }
         else:  # hard_check_warning / rag_judgment
             response = "그래도 저장"
         session = pipeline_session.resume_session(session.session_id, response)
@@ -353,12 +420,16 @@ def test_completed_saved_session_result_matches_run_pipeline_shape():
 
     while session.pending_decision is not None:
         dt = session.pending_decision.decision_type
-        if dt == "entity_name":
-            response = ""
+        if dt == "entity_category_and_name":
+            response = {"category": None, "name": None, "action": "edit"}
         elif dt == "entity_terminal_status":
             response = "예"
         elif dt == "entity_required_field":
-            response = {f["name"]: "미상" for f in session.pending_decision.payload["fields"]}
+            response = {
+                f["name"]: "미상"
+                for f in session.pending_decision.payload["fields"]
+                if f["required"]
+            }
         elif dt in ("hard_check_warning", "rag_judgment"):
             response = "그래도 저장"
         else:  # diff_item

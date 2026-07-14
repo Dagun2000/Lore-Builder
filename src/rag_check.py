@@ -156,8 +156,14 @@ def check_notes_conflict(entities: list, raw_text: str) -> Judgment | None:
 # 2-4. Reversible status consistency
 # ---------------------------------------------------------------------------
 
-def check_status_consistency(entity_id: str, raw_text: str) -> Judgment | None:
-    active_effects = storage.get_status_effects(entity_id)
+def check_status_consistency(entity_id: str, raw_text: str, event_year: int) -> Judgment | None:
+    """Gated by event_year (Phase 9 status-range patch): if no status range
+    on this entity actually covers event_year, there's nothing for the event
+    to be consistent or inconsistent *with* at that point in time, so skip
+    the LLM call entirely rather than asking it to judge against a status
+    that (from the timeline's perspective) hadn't started yet, or had
+    already ended, when this event happened."""
+    active_effects = storage.get_active_statuses_at(entity_id, event_year)
     if not active_effects:
         return None
 
@@ -204,7 +210,7 @@ def check_status_consistency(entity_id: str, raw_text: str) -> Judgment | None:
 # 2-5. Integration
 # ---------------------------------------------------------------------------
 
-def run_rag_checks(entities: list, raw_text: str) -> list:
+def run_rag_checks(entities: list, raw_text: str, event_year: int) -> list:
     judgments = []
 
     # check_rule_violation gets ONLY the canonical hard-rule texts, not the
@@ -222,7 +228,7 @@ def run_rag_checks(entities: list, raw_text: str) -> list:
         judgments.append(notes_judgment)
 
     for entity_id in entities:
-        status_judgment = check_status_consistency(entity_id, raw_text)
+        status_judgment = check_status_consistency(entity_id, raw_text, event_year)
         if status_judgment is not None:
             judgments.append(status_judgment)
 
