@@ -4,6 +4,10 @@ character:
     - name: name
       type: text
       required: true
+    - name: gender
+      type: enum
+      options: [남성, 여성, 기타]
+      required: false
     - name: birth_year
       type: integer
       required: false

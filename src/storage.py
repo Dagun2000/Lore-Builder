@@ -134,6 +134,28 @@ def entity_exists(category: str, entity_id: str) -> bool:
     return get_entity(category, entity_id) is not None
 
 
+def list_entities(category: str) -> list:
+    """Every row in `category`'s table, deserialized like get_entity() —
+    used by the GUI's dictionary/search/reference-picker views, which need
+    the whole table rather than one row at a time."""
+    conn = get_connection()
+    init_db(conn)
+
+    registry = load_schema_registry()
+    field_defs = {f["name"]: f for f in registry[category]["fields"]}
+
+    rows = conn.execute(f'SELECT * FROM "{category}"').fetchall()
+    conn.close()
+
+    results = []
+    for row in rows:
+        result = {"id": row["id"]}
+        for name, definition in field_defs.items():
+            result[name] = _deserialize(definition["type"], row[name])
+        results.append(result)
+    return results
+
+
 def find_related_timeline_ids(entity_id: str) -> list:
     """Timeline ids related to entity_id, via:
     - timeline.location referencing entity_id directly
@@ -244,9 +266,23 @@ def query_chroma(query_text: str, top_k: int = 3, ids: list | None = None) -> di
     """`ids`, when given, restricts the similarity search to that subset of
     documents instead of the whole collection — used by Phase 6's
     find_related_context to *rank* a fixed candidate pool rather than
-    open a fresh whole-collection search."""
+    open a fresh whole-collection search.
+
+    Not every id in `ids` is guaranteed to have a Chroma document — SQLite
+    and Chroma are two separate stores, and anything saved via save_entity
+    without a matching save_to_chroma call (a test fixture, a hand-edited
+    row, an older entity from before this code path existed) leaves a gap.
+    collection.query(ids=...) hard-errors on an id it can't find, where
+    collection.get(ids=...) just silently returns whatever subset exists —
+    so check existence with .get() first and drop anything missing, rather
+    than let the whole ranking crash over one orphaned id."""
     collection = get_chroma_collection()
     kwargs = {"query_texts": [query_text], "n_results": top_k}
     if ids:
-        kwargs["ids"] = ids
+        existing = set(collection.get(ids=ids)["ids"])
+        filtered_ids = [i for i in ids if i in existing]
+        if not filtered_ids:
+            return {"ids": [[]], "documents": [[]]}
+        kwargs["ids"] = filtered_ids
+        kwargs["n_results"] = min(top_k, len(filtered_ids))
     return collection.query(**kwargs)

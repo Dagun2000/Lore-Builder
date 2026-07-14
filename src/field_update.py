@@ -309,6 +309,15 @@ def update_field_flow(entity_id: str, field_name: str, new_value) -> dict:
         storage.save_entity(category, entity_id, {field_name: new_value})
 
     _print(f"{entity_id}.{field_name} 값이 저장되었습니다.")
+
+    # This entity just got fixed, so whatever flags were raised against it
+    # (from any edit context, not just this one) no longer apply — clearing
+    # them here is what makes list_flags_deduped()'s one-line-per-entity view
+    # actually stay accurate instead of showing a "fixed" entity forever.
+    cleared = flags.clear_flags_for_entity(entity_id)
+    if cleared:
+        _print(f"이 엔티티에 걸려있던 플래그 {cleared}건이 자동 해제됐습니다.")
+
     return {
         "status": "saved",
         "entity_id": entity_id,
@@ -316,4 +325,5 @@ def update_field_flow(entity_id: str, field_name: str, new_value) -> dict:
         "conflicts": conflicts,
         "related_docs": related_docs,
         "flagged": flagged,
+        "cleared_flags": cleared,
     }

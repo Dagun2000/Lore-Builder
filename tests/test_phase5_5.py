@@ -46,9 +46,9 @@ def test_new_character_name_prompt_defaults_to_tag_but_cannot_be_cleared(
 def test_find_existing_matches_uses_name_field_for_char_mira():
     # char_mira's notes text doesn't literally contain "미라" in every seed
     # revision — matching must work off the dedicated name field regardless.
-    matches = mapping.find_existing_matches("미라", "character")
+    exact, partial = mapping.find_existing_matches("미라", "character")
 
-    assert matches == ["char_mira"]
+    assert exact == ["char_mira"]
 
 
 def test_find_existing_matches_partial_name_match():
@@ -57,6 +57,7 @@ def test_find_existing_matches_partial_name_match():
     )
 
     # "폰타인" has no exact-name match anywhere, only this partial one.
-    matches = mapping.find_existing_matches("폰타인", "character")
+    exact, partial = mapping.find_existing_matches("폰타인", "character")
 
-    assert "char_test_fontaine" in matches
+    assert exact == []
+    assert "char_test_fontaine" in partial

@@ -29,6 +29,11 @@ def load_status_effects() -> list:
     return data["status_effects"]
 
 
+def list_categories() -> list:
+    """Return every category name in schema_registry.yaml, file order."""
+    return list(load_schema_registry().keys())
+
+
 def get_category_schema(category: str) -> dict:
     registry = load_schema_registry()
     if category not in registry:

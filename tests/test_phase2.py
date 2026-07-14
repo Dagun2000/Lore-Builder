@@ -19,15 +19,17 @@ def test_parse_input_raises_without_year():
 
 
 def test_find_existing_matches_matches_seed_char_jang():
-    matches = mapping.find_existing_matches("쟝", "character")
+    exact, partial = mapping.find_existing_matches("쟝", "character")
 
-    assert matches == ["char_jang"]
+    assert exact == ["char_jang"]
+    assert partial == []
 
 
 def test_find_existing_matches_returns_empty_for_unknown_tag():
-    matches = mapping.find_existing_matches("리나", "character")
+    exact, partial = mapping.find_existing_matches("리나", "character")
 
-    assert matches == []
+    assert exact == []
+    assert partial == []
 
 
 def test_infer_terminal_status_detects_death_context(monkeypatch):

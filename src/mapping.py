@@ -79,16 +79,21 @@ def infer_category(tag: str, context_sentence: str) -> str:
 # 2-2. Existing entity matching (rule-based string match on the `name` field)
 # ---------------------------------------------------------------------------
 
-def find_existing_matches(tag: str, category: str) -> list:
+def find_existing_matches(tag: str, category: str) -> tuple:
     """Match against the category's `name` field only — notes/appearance are
     descriptive prose, not identifiers, and matching against them meant a tag
     only worked if it happened to appear verbatim in some sentence (e.g.
     char_mira went unmatched until "미라" was literally written into her
     notes). Categories with no `name` field (relationship/timeline/system)
-    are never tag-matchable and always return []."""
+    are never tag-matchable and always return ([], []).
+
+    Returns (exact_matches, partial_matches) as two separate lists — callers
+    must never auto-connect on a partial match, even if it's the only one
+    (e.g. tag "주점" must not silently resolve to "검은 산양 주점"); only a
+    unique *exact* match may bypass confirmation."""
     field_names = {f["name"] for f in schema.get_fields(category)}
     if "name" not in field_names or not tag:
-        return []
+        return [], []
 
     conn = storage.get_connection()
     storage.init_db(conn)
@@ -108,7 +113,7 @@ def find_existing_matches(tag: str, category: str) -> list:
         elif tag in name or name in tag:
             partial_matches.append(row["id"])
 
-    return exact_matches if exact_matches else partial_matches
+    return exact_matches, partial_matches
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +138,7 @@ def _prompt_name(tag: str) -> str:
     return answer if answer else tag
 
 
-def _generate_entity_id(category: str, tag: str) -> str:
+def generate_entity_id(category: str, tag: str) -> str:
     prefix = schema.load_schema_registry()[category]["id_prefix"]
     slug = re.sub(r"\s+", "_", tag.strip())
     candidate = f"{prefix}{slug}"
@@ -214,7 +219,7 @@ def _create_new_entity(category: str, tag: str, context_sentence: str, year: int
     if "name" in field_names:
         fields["name"] = _prompt_name(tag)
 
-    entity_id = _generate_entity_id(category, fields.get("name", tag))
+    entity_id = generate_entity_id(category, fields.get("name", tag))
     allow_optional_review = True
 
     required_fields = schema.get_required_fields(category)
@@ -245,16 +250,42 @@ def _create_new_entity(category: str, tag: str, context_sentence: str, year: int
     return entity_id
 
 
+def _select_or_create(
+    category: str, tag: str, context_sentence: str, year: int, candidates: list
+) -> str:
+    """Shown whenever a tag has no *exact* name match but does have partial
+    (substring) hits — a combobox of the existing candidates plus a "새로
+    작성" option to type a brand-new entity, never a silent auto-connect."""
+    print(f"[{tag}]와(과) 정확히 일치하는 항목은 없지만, 비슷한 후보가 있습니다:")
+    for i, entity_id in enumerate(candidates, start=1):
+        print(f"  {i}. {entity_id}")
+    create_choice = len(candidates) + 1
+    print(f"  {create_choice}. 새로 작성 (신규 {category} 엔티티 생성)")
+
+    while True:
+        choice = _prompt(f"번호를 선택하세요 (1-{create_choice}): ").strip()
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(candidates):
+                return candidates[idx - 1]
+            if idx == create_choice:
+                return _create_new_entity(category, tag, context_sentence, year)
+        print("잘못된 번호입니다.")
+
+
 def resolve_entity(tag: str, context_sentence: str, year: int) -> str:
     category = infer_category(tag, context_sentence)
-    matches = find_existing_matches(tag, category)
+    exact_matches, partial_matches = find_existing_matches(tag, category)
 
-    if len(matches) == 1:
-        entity_id = matches[0]
+    if len(exact_matches) == 1:
+        entity_id = exact_matches[0]
         print(f"[{tag}]을(를) {entity_id}로 인식했습니다.")
         return entity_id
 
-    if len(matches) > 1:
-        return _select_from_candidates(tag, matches)
+    if len(exact_matches) > 1:
+        return _select_from_candidates(tag, exact_matches)
+
+    if partial_matches:
+        return _select_or_create(category, tag, context_sentence, year, partial_matches)
 
     return _create_new_entity(category, tag, context_sentence, year)

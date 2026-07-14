@@ -29,28 +29,54 @@ def _print(message: str = "") -> None:
     print(message)
 
 
+def _select_candidate(query: str, candidates: list, allow_cancel: bool = False) -> str | None:
+    """Numbered pick list. `allow_cancel` adds a "0. 취소" option — used for
+    partial/substring matches, which must never auto-connect even when
+    there's only one candidate, unlike a unique exact match."""
+    if len(candidates) > 1:
+        _print(f"'{query}'와(과) 일치하는 후보가 여러 개입니다:")
+    else:
+        _print(f"'{query}'와(과) 정확히 일치하진 않지만 비슷한 후보가 있습니다:")
+    for i, candidate_id in enumerate(candidates, start=1):
+        _print(f"  {i}. {candidate_id}")
+    if allow_cancel:
+        _print("  0. 취소 (다시 검색)")
+
+    low = 0 if allow_cancel else 1
+    choice = _prompt(f"번호를 선택하세요 ({low}-{len(candidates)}): ").strip()
+    if choice.isdigit():
+        idx = int(choice)
+        if allow_cancel and idx == 0:
+            return None
+        if 1 <= idx <= len(candidates):
+            return candidates[idx - 1]
+    _print("잘못된 번호입니다.")
+    return None
+
+
 def _find_entity_interactive(query: str) -> str | None:
     category = schema.category_from_id(query)
     if category and storage.entity_exists(category, query):
         return query
 
-    candidates = []
+    exact_candidates = []
+    partial_candidates = []
     for candidate_category in _NAME_BEARING_CATEGORIES:
-        candidates.extend(mapping.find_existing_matches(query, candidate_category))
+        exact, partial = mapping.find_existing_matches(query, candidate_category)
+        exact_candidates.extend(exact)
+        partial_candidates.extend(partial)
 
-    if not candidates:
-        _print(f"'{query}'와(과) 일치하는 엔티티를 찾지 못했습니다.")
-        return None
-    if len(candidates) == 1:
-        return candidates[0]
+    if len(exact_candidates) == 1:
+        return exact_candidates[0]
+    if len(exact_candidates) > 1:
+        return _select_candidate(query, exact_candidates)
 
-    _print(f"'{query}'와(과) 일치하는 후보가 여러 개입니다:")
-    for i, candidate_id in enumerate(candidates, start=1):
-        _print(f"  {i}. {candidate_id}")
-    choice = _prompt(f"번호를 선택하세요 (1-{len(candidates)}): ").strip()
-    if choice.isdigit() and 1 <= int(choice) <= len(candidates):
-        return candidates[int(choice) - 1]
-    _print("잘못된 번호입니다.")
+    if partial_candidates:
+        # No exact match — even a single substring hit must be confirmed,
+        # never silently auto-connected (e.g. "주점" -> "검은 산양 주점").
+        return _select_candidate(query, partial_candidates, allow_cancel=True)
+
+    _print(f"'{query}'와(과) 일치하는 엔티티를 찾지 못했습니다.")
     return None
 
 
@@ -68,7 +94,7 @@ def _pick_field_interactive(category: str) -> str | None:
 
 
 def _print_flags_list() -> None:
-    entries = flags.list_flags()
+    entries = flags.list_flags_deduped()
     if not entries:
         _print("플래그된 항목이 없습니다.")
         return
