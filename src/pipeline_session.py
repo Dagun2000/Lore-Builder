@@ -99,6 +99,13 @@ class PipelineSession:
     diff_approved: list = field(default_factory=list)
     pending_decision: "PendingDecision | None" = None
     result: dict | None = None
+    # Phase 10 patch 4 (J): which entity_ids _create_new_entity_gen actually
+    # storage.save_entity'd during this run — lets _pipeline_generator tell
+    # "a brand-new entity's attributes were saved" apart from "every tag
+    # resolved to something that already existed, nothing was written",
+    # which otherwise both look identical (an empty remaining_years pool)
+    # from the outside.
+    newly_created_entities: list = field(default_factory=list)
     _generator: object = field(default=None, repr=False)
 
 
@@ -156,22 +163,51 @@ def _create_new_entity_gen(
     if "name" in field_names:
         fields["name"] = response.get("name") or tag
 
+    # Phase 10 patch 4 (I): re-check for an existing entity right before
+    # minting a new id — covers both "user corrected the category" and "user
+    # retyped a different name here" (_resolve_entity_gen's search already
+    # covered the original tag/inferred-category pair, but not whatever the
+    # user might change on this screen). Without this, a misclassified "밥"
+    # that the user manually fixes to "character" still produced a duplicate
+    # char_밥_2 instead of resolving to the existing char_밥.
+    search_name = fields.get("name", tag)
+    exact, _partial = mapping.find_existing_matches(search_name, category)
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        choice = yield PendingDecision(
+            "entity_candidates", {"tag": tag, "candidates": exact, "allow_create": False}, {"tag": tag}
+        )
+        return choice
+
     entity_id = mapping.generate_entity_id(category, fields.get("name", tag))
 
-    # Phase 10 patch 2 (A): auto-fill lifecycle/attribute fields explicitly
-    # stated in the sentence, for this brand-new entity only — an already-
-    # existing entity never reaches this generator (see _resolve_entity_gen),
-    # so its fields can never be silently changed from chat. Years consumed
-    # this way are popped from `remaining_years` so Step 3's event judgment
-    # never sees them (otherwise a founding-year mention sitting next to an
-    # unrelated event year falsely looks like two separate events).
+    # Phase 10 patch 2 (A) / patch 3 (E): split the sentence's content about
+    # this brand-new entity into lifecycle fields, a leftover time-bound
+    # event (untouched here — Step 3 still handles that), and a persistent
+    # trait/rule statement that belongs in `notes` (never an event, never
+    # requires a year). An already-existing entity never reaches this
+    # generator (see _resolve_entity_gen), so its fields/notes can never be
+    # silently changed from chat. A *bare* consumed year (nothing more than
+    # the fact itself) is popped from `remaining_years` so Step 3's event
+    # judgment never sees it (otherwise a founding-year mention sitting next
+    # to an unrelated event year falsely looks like two separate events) —
+    # but a *narrative* consumed year (patch 4, K: the fact came with actual
+    # circumstance/interaction, e.g. "110년에 술을 먹고 싸우다가 죽었다")
+    # stays in the pool, because filling death_year here doesn't replace the
+    # point event Step 3 still needs to build for that same year.
     attrs = inference.infer_new_entity_attributes(category, tag, context_sentence, list(remaining_years))
     for name, value in attrs["attributes"].items():
         if fields.get(name) is None:
             fields[name] = value
+    narrative_years = set(attrs.get("narrative_years") or [])
     for consumed_year in attrs["consumed_years"]:
+        if consumed_year in narrative_years:
+            continue
         if consumed_year in remaining_years:
             remaining_years.remove(consumed_year)
+    if attrs.get("notes") and fields.get("notes") is None:
+        fields["notes"] = attrs["notes"]
 
     if action == "save":
         # "저장 후 계속" skips only the *optional* fields — required fields
@@ -190,6 +226,7 @@ def _create_new_entity_gen(
         if (
             category == "character"
             and fields.get("death_year") is None
+            and year is not None
             and mapping.infer_terminal_status(context_sentence)
         ):
             answer = yield PendingDecision(
@@ -234,6 +271,7 @@ def _create_new_entity_gen(
 
     storage.save_entity(category, entity_id, fields)
     storage.save_to_chroma(entity_id, context_sentence, {"category": category, "tag": tag})
+    session.newly_created_entities.append(entity_id)
     return entity_id
 
 
@@ -241,9 +279,16 @@ def _resolve_entity_gen(session: PipelineSession, tag: str, context_sentence: st
     """`remaining_years` is the whole input's year pool, shared and mutated
     across every tag in this input — a new entity created here may consume
     some of it as lifecycle attributes (see _create_new_entity_gen), which
-    is why this is threaded by reference instead of a single primary year."""
-    category = mapping.infer_category(tag, context_sentence)
-    exact_matches, partial_matches = mapping.find_existing_matches(tag, category)
+    is why this is threaded by reference instead of a single primary year.
+
+    Phase 10 patch 4 (I): name is searched across *every* name-bearing
+    category before category is ever inferred — an existing entity must
+    always be findable by name regardless of whether the (LLM-guessed)
+    category is right, since gating the search behind that guess is what
+    let a misclassified "밥" (an existing character, misread as a race)
+    produce a duplicate instead of resolving to char_밥. Category inference
+    only runs once this search comes up completely empty."""
+    exact_matches, partial_matches = mapping.find_existing_matches_any_category(tag)
     year = remaining_years[0] if remaining_years else None
 
     if len(exact_matches) == 1:
@@ -256,6 +301,8 @@ def _resolve_entity_gen(session: PipelineSession, tag: str, context_sentence: st
             {"tag": tag},
         )
         return choice
+
+    category = mapping.infer_category(tag, context_sentence)
 
     if partial_matches:
         choice = yield PendingDecision(
@@ -393,15 +440,35 @@ def _pipeline_generator(session: PipelineSession):
         session.resolved_entities = dict(resolved_entities)
 
     if not remaining_years:
-        # Every extracted year was consumed as a lifecycle attribute during
-        # entity creation (e.g. "1900년에 창단된 [세력]은 ...") — there's no
-        # year left to anchor a timeline record to, so there's no event to
-        # judge/check/diff. The entity's attributes were already saved
-        # directly in _create_new_entity_gen; nothing further to do.
+        # Every extracted year was consumed as a (bare) lifecycle attribute
+        # during entity creation (e.g. "1900년에 창단된 [세력]은 ..."), or
+        # there was no year in the input to begin with — either way there's
+        # no year left to anchor a timeline record to, so there's no event
+        # to judge/check/diff.
+        #
+        # Phase 10 patch 4 (J): this used to unconditionally report success
+        # here, even when every tag resolved to an *existing* entity and
+        # nothing was actually written anywhere (e.g. "[아마조네스 용병단]은
+        # 아주 유명하다" about an entity that already exists — chat never
+        # edits an existing entity's fields, per the standing boundary, so
+        # there was genuinely nothing to save, but the old message claimed
+        # "속성 정보가 저장되었습니다" regardless). Only report the
+        # attributes-saved status when _create_new_entity_gen actually
+        # created something this run; otherwise say so plainly and point at
+        # the real edit path.
+        if session.newly_created_entities:
+            return {
+                "status": "entity_only",
+                "resolved_entities": resolved_entities,
+                "message": "속성 정보가 엔티티에 직접 저장되었고, 별도의 사건 기록은 생성되지 않았습니다.",
+            }
         return {
-            "status": "entity_only",
+            "status": "no_new_info",
             "resolved_entities": resolved_entities,
-            "message": "속성 정보가 엔티티에 직접 저장되었고, 별도의 사건 기록은 생성되지 않았습니다.",
+            "message": (
+                "새로 저장할 내용이 없습니다. 채팅은 신규 사건/엔티티 등록 전용이라 기존 엔티티의 "
+                "속성은 바꾸지 않습니다 — 기존 엔티티 정보를 수정하려면 디테일 패널을 이용해주세요."
+            ),
         }
 
     event_parsed = replace(parsed, years=remaining_years)

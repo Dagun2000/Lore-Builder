@@ -128,11 +128,16 @@ def _render_value_field(field_def: dict, current_value, key: str, label: str | N
         return st.checkbox(display_name, value=bool(current_value), key=key)
 
     if field_type == "integer":
-        # Streamlit's number_input always returns a real number (no "empty"
-        # state) — a required integer field can't be left blank here the
-        # way a text field can. Minor known gap, not worth a custom widget
-        # for; wrong values are still fixable afterward via the detail view.
-        return int(st.number_input(display_name, value=int(current_value or 0), step=1, key=key))
+        # Streamlit 1.28+ lets value=None render a genuinely empty spinner
+        # that stays None until the user types something — passing None
+        # straight through (instead of coercing to 0) is what actually fixes
+        # an unset field (birth_year, founded_year, ...) silently becoming a
+        # real 0 the moment "저장" was clicked without the widget being
+        # touched. (Phase 10 patch 4, G — this replaces the "값 없음"
+        # checkbox from patch 3's first attempt at the same bug, now that
+        # the installed Streamlit version (1.59.2) supports the native
+        # option directly.)
+        return st.number_input(display_name, value=current_value, step=1, key=key)
 
     if field_type == "list":
         raw = st.text_input(display_name, value=", ".join(current_value or []), key=key)
@@ -168,6 +173,8 @@ def _describe_result(result: dict) -> str:
         return "승인된 변경사항이 없어 저장할 내용이 없습니다."
     if status == "entity_only":
         return result.get("message", "엔티티가 저장되었습니다. 별도의 사건 기록은 없습니다.")
+    if status == "no_new_info":
+        return result.get("message", "새로 저장할 내용이 없습니다.")
     if status == "saved":
         applied = result.get("applied", [])
         names = ", ".join(

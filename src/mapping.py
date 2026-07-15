@@ -115,6 +115,29 @@ def find_existing_matches(tag: str, category: str) -> tuple:
     return exact_matches, partial_matches
 
 
+def _name_bearing_categories() -> list:
+    """Every category with a `name` field, computed from the schema (not a
+    hardcoded list) so a category added later via the GUI participates
+    automatically."""
+    return [c for c in schema.list_categories() if any(f["name"] == "name" for f in schema.get_fields(c))]
+
+
+def find_existing_matches_any_category(tag: str) -> tuple:
+    """Search every name-bearing category for `tag`, ignoring category
+    entirely (Phase 10 patch 4, I). Name is the real identity signal — an
+    LLM category guess can be wrong (e.g. "밥" misread as a race instead of
+    a character), and gating the existing-entity search behind that guess
+    meant a wrong guess made an already-registered entity unfindable,
+    producing a duplicate the moment the user picked "신규 생성". Category
+    inference should only ever run *after* this search comes up empty."""
+    exact_matches, partial_matches = [], []
+    for category in _name_bearing_categories():
+        exact, partial = find_existing_matches(tag, category)
+        exact_matches.extend(exact)
+        partial_matches.extend(partial)
+    return exact_matches, partial_matches
+
+
 # ---------------------------------------------------------------------------
 # 2-3. New-entity creation flow (character death-year proposal via LLM)
 # ---------------------------------------------------------------------------

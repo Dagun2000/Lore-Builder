@@ -112,6 +112,22 @@ def check_rule_violation(raw_text: str, context_docs: list) -> Judgment | None:
 # 2-3. Notes-based qualitative conflict
 # ---------------------------------------------------------------------------
 
+_FIELD_SUMMARY_EXCLUDED = {"id", "name", "notes", "event_ids", "lifespan_check_ack"}
+
+
+def _entity_field_summary(record: dict) -> str | None:
+    """A flat "field=value" summary of an entity's own stored fields (Phase
+    10 patch 5) — gender, race, etc. `notes` and internal bookkeeping fields
+    (event_ids, lifespan_check_ack) are excluded; notes gets its own line
+    below, and the rest aren't domain content an LLM should reason about."""
+    parts = [
+        f"{name}={value}"
+        for name, value in record.items()
+        if name not in _FIELD_SUMMARY_EXCLUDED and value not in (None, "", [])
+    ]
+    return ", ".join(parts) if parts else None
+
+
 def check_notes_conflict(entities: list, raw_text: str) -> Judgment | None:
     notes_lines = []
     for entity_id in entities:
@@ -121,6 +137,18 @@ def check_notes_conflict(entities: list, raw_text: str) -> Judgment | None:
         record = storage.get_entity(category, entity_id)
         if not record:
             continue
+        # Phase 10 patch 5: the entity's own *structured* field values
+        # (gender, race, ...) must be in context too, not just free-text
+        # notes. Before this, a brand-new entity's gender only ever reached
+        # this check by accident — because it happened to still be sitting
+        # in `raw_text` (the LLM reads the sentence too) — while an existing
+        # entity's already-saved gender was invisible the moment the current
+        # sentence didn't restate it, which is exactly why "성별을 이미 저장된
+        # 기존 캐릭터가 여성전용 세력에 가입" kept slipping through undetected
+        # across multiple rounds of testing.
+        summary = _entity_field_summary(record)
+        if summary:
+            notes_lines.append(f"{entity_id}의 저장된 정보: {summary}")
         if record.get("notes"):
             notes_lines.append(f"{entity_id}: {record['notes']}")
         # A character's race carries its own notes (e.g. dietary restrictions)
@@ -145,6 +173,7 @@ def check_notes_conflict(entities: list, raw_text: str) -> Judgment | None:
         return None
 
     notes_block = "\n".join(f"- {line}" for line in notes_lines)
+    print(f"[rag_check] check_notes_conflict 컨텍스트:\n{notes_block}")
     prompt = (
         "너는 판타지 세계관의 설정 감사관이다. 아래는 관련 엔티티들의 기존 설정(notes)이다. "
         "새로 입력된 사건 문장이 이 설정과 모순되는지 판단하라.\n\n"

@@ -25,7 +25,10 @@ def parse_input(text: str) -> ParsedInput:
     text_outside_brackets = _TAG_PATTERN.sub(" ", text)
     years = sorted({int(m) for m in _YEAR_PATTERN.findall(text_outside_brackets)})
 
-    if not years:
-        raise ValueError("연도를 명시해주세요 (예: '2100년').")
-
+    # A year is no longer required at parse time (Phase 10 patch 3, E): a
+    # pure entity-introduction sentence with no event ("[아마조네스 용병단]은
+    # 여성만이 가입 가능한 특수한 용병단이다") is valid input on its own —
+    # years only matter once there's an actual event to anchor, which
+    # pipeline_session._pipeline_generator already handles by returning
+    # status "entity_only" when no year survives entity resolution.
     return ParsedInput(years=years, tags=tags, raw_text=text)

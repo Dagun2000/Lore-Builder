@@ -1,5 +1,3 @@
-import pytest
-
 from src import mapping, parser, storage
 
 
@@ -13,9 +11,13 @@ def test_parse_input_extracts_year_and_tags():
     assert result.raw_text == text
 
 
-def test_parse_input_raises_without_year():
-    with pytest.raises(ValueError):
-        parser.parse_input("[쟝]이 [검은 산양 여관]에서 얻어맞았다.")
+def test_parse_input_allows_missing_year():
+    # Phase 10 patch 3 (E): a year is no longer required at parse time — a
+    # pure entity-introduction sentence with no event is valid on its own.
+    result = parser.parse_input("[쟝]이 [검은 산양 여관]에서 얻어맞았다.")
+
+    assert result.years == []
+    assert result.tags == ["쟝", "검은 산양 여관"]
 
 
 def test_find_existing_matches_matches_seed_char_jang():

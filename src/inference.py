@@ -196,50 +196,103 @@ def _attribute_candidate_fields(category: str) -> list:
 
 def infer_new_entity_attributes(category: str, tag: str, context_sentence: str, years: list) -> dict:
     """For a brand-new entity only (never called on an existing one — see
-    pipeline_session._resolve_entity_gen), pull whatever lifecycle years or
-    simple attributes (gender, etc.) the sentence states outright, so they
-    land directly on the entity's fields instead of becoming a spurious
-    duration/point event. Never infers or back-calculates a value — only
-    reports what's explicitly written — and only ever reports a year that's
-    in `years` (this input's own extracted year list), so the caller can
-    safely drop it before Step 3's event-ambiguity judgment runs (otherwise
-    a founding-year mention sitting next to an unrelated event year falsely
-    looks like two different events crammed into one sentence).
+    pipeline_session._resolve_entity_gen), split the sentence's content about
+    this entity into three non-overlapping paths (Phase 10 patch 3, E):
 
-    Returns {"attributes": {field_name: value, ...}, "consumed_years": [...]}."""
+      1. lifecycle fields — a year explicitly tied to a role
+         lifecycle_start/end field (founded_year, death_year, ...) or an
+         explicit optional-enum value (gender, ...) -> straight onto the
+         entity's own fields, never an event by itself.
+      2. a time-bound occurrence/status (something that *happened* or
+         *started/ended* at a point in time) -> left untouched here; Step 3
+         (infer_event) + archivist still turn that into a timeline record,
+         exactly as before this patch.
+      3. a persistent trait/rule/characteristic that is always true rather
+         than something that happened ("여성만 가입 가능하다") -> the
+         entity's own `notes` field, verbatim-ish, no event, no year
+         required at all.
+
+    Never infers or back-calculates a value for path 1 — only reports what's
+    explicitly written — and only ever reports a year that's in `years`
+    (this input's own extracted year list, which may be empty: a pure
+    introduction sentence with no year is valid input).
+
+    Phase 10 patch 4 (K): a lifecycle year is not always a *bare* fact — "100년에
+    태어난... 110년에 술을 먹고 싸우다가 죽었다" ties death_year to a whole
+    narrated scene, not just the number 110. Blindly dropping every
+    consumed year from the caller's event-judgment pool (as patch 2/3 did)
+    silently threw that scene away whenever it happened to land on the same
+    year as the lifecycle fact. So each consumed year is also classified as
+    "bare" (nothing more than the fact itself — safe to drop entirely, no
+    event needed) or "narrative" (comes with concrete circumstance/action or
+    an interaction with another entity — the caller must keep this year
+    available for Step 3, which still builds a point event from it *in
+    addition to* the field already being filled here).
+
+    Returns {"attributes": {field_name: value, ...}, "consumed_years": [...],
+    "narrative_years": [...] (subset of consumed_years), "notes": str | None}."""
     candidate_fields = _attribute_candidate_fields(category)
-    if not candidate_fields or not years:
-        return {"attributes": {}, "consumed_years": []}
+    has_notes_field = any(f["name"] == "notes" for f in schema.get_fields(category))
+    empty_result = {"attributes": {}, "consumed_years": [], "narrative_years": [], "notes": None}
+    if not candidate_fields and not has_notes_field:
+        return empty_result
 
-    field_lines = []
-    for f in candidate_fields:
-        if f["type"] == "enum":
-            field_lines.append(f"- {f['name']} (선택지: {', '.join(f.get('options') or [])})")
-        else:
-            field_lines.append(f"- {f['name']} (연도, 의미: {f.get('role')})")
+    if candidate_fields:
+        field_lines = []
+        for f in candidate_fields:
+            if f["type"] == "enum":
+                field_lines.append(f"- {f['name']} (선택지: {', '.join(f.get('options') or [])})")
+            else:
+                field_lines.append(f"- {f['name']} (연도, 의미: {f.get('role')})")
+        field_block = "\n".join(field_lines)
+    else:
+        field_block = "(해당 없음)"
 
-    years_text = ", ".join(str(y) for y in years)
+    years_text = ", ".join(str(y) for y in years) if years else "(문장에 연도 없음)"
+    notes_instruction = (
+        '  "notes": "path 3에 해당하는 서술이 있으면 문장에서 가져온 내용, 없으면 null"\n'
+        if has_notes_field
+        else '  "notes": null\n'
+    )
     prompt = (
         "너는 판타지 세계관 로어 데이터베이스의 신규 엔티티 등록 보조자다.\n"
         f'새로 등록되는 엔티티: "{tag}" (카테고리: {category})\n'
         f"원문: {context_sentence}\n"
         f"문장에서 추출된 연도(들): {years_text}\n\n"
-        "아래 필드 각각에 대해, 문장에 '명시적으로' 쓰인 값이 있을 때만 채워라. 서술로부터 "
-        "추론하거나 역산하지 마라 — 문장에 그대로 나온 값만 인정한다. 연도 필드에 채우는 값은 "
-        "반드시 위 연도 목록 중 하나여야 한다.\n\n"
-        f"필드 목록:\n{chr(10).join(field_lines)}\n\n"
+        "이 문장에서 이 엔티티에 대해 서술된 내용을 아래 세 갈래 중 하나로만 분류하라 "
+        "(하나의 서술은 반드시 한 갈래에만 속한다):\n\n"
+        "1) lifecycle 필드값 — 아래 필드 목록에 명시적으로 대응하는 연도/선택지 값. 서술로부터 "
+        "추론하거나 역산하지 마라 — 문장에 그대로 나온 값만 인정한다. 연도 값은 반드시 위 연도 "
+        "목록 중 하나여야 한다. 이 값을 채웠다고 해서 2)를 무시하지는 마라 — 같은 연도에 구체적인 "
+        "정황이나 상호작용이 함께 서술되어 있다면 그건 반드시 narrative_years에도 표시해야 한다 "
+        "(아래 설명 참고).\n"
+        f"필드 목록:\n{field_block}\n\n"
+        "2) 특정 시점에 벌어진 사건이나, 시작/종료되는 상태·관계에 대한 서술 (예: '용병단이 "
+        "쟝의 가입을 거절했다', '봉인되었다', '술을 먹고 싸우다가', '유리창이 터졌다') — 이건 "
+        "별도의 사건 기록 파이프라인이 처리하므로 attributes에도 notes에도 넣지 마라. 대신, 이런 "
+        "서술이 붙어있는 연도가 1)에서도 lifecycle 필드로 쓰였다면, 그 연도를 반드시 "
+        "narrative_years에 포함시켜라 — 그래야 그 연도가 사라지지 않고 별도의 사건 기록으로도 "
+        "남는다. 단순 사실 진술뿐이고(예: '100년에 태어났다'처럼 구체적 정황/상호작용이 전혀 "
+        "없으면) narrative_years에 넣지 마라.\n\n"
+        "3) 특정 시점과 무관하게 항상 참인 지속적 특징/규칙/성질에 대한 서술 (예: '여성만 가입 "
+        "가능하다', '검은 갑옷을 입는다', '불을 두려워한다') — notes에 문장에서 가져온 내용으로 "
+        "채워라. 이런 서술이 전혀 없으면 notes는 null로 둬라.\n\n"
         "아래 JSON 형식으로만 답하라 (다른 설명 금지):\n"
         "{\n"
         '  "attributes": {"필드명": 값, ...},\n'
-        '  "consumed_years": [attributes에 실제로 쓰인 연도들]\n'
+        '  "consumed_years": [attributes에 실제로 쓰인 연도들],\n'
+        '  "narrative_years": [consumed_years 중, 같은 연도에 구체적 정황/상호작용 서술이 함께 '
+        '있는 것들],\n'
+        f"{notes_instruction}"
         "}\n"
-        "명시된 값이 하나도 없으면 {\"attributes\": {}, \"consumed_years\": []}로 답하라.\n"
+        '해당하는 내용이 하나도 없으면 {"attributes": {}, "consumed_years": [], '
+        '"narrative_years": [], "notes": null}로 답하라.\n'
     )
 
     try:
         data = _extract_json(_invoke_llm(prompt))
     except Exception:
-        return {"attributes": {}, "consumed_years": []}
+        return empty_result
 
     valid_years = set(years)
     raw_attrs = data.get("attributes") or {}
@@ -265,4 +318,14 @@ def infer_new_entity_attributes(category: str, tag: str, context_sentence: str, 
         if field_def["type"] != "enum":
             consumed.add(value)
 
-    return {"attributes": attributes, "consumed_years": sorted(consumed)}
+    narrative = {y for y in (data.get("narrative_years") or []) if y in consumed}
+
+    notes_value = data.get("notes")
+    notes = notes_value.strip() if has_notes_field and isinstance(notes_value, str) and notes_value.strip() else None
+
+    return {
+        "attributes": attributes,
+        "consumed_years": sorted(consumed),
+        "narrative_years": sorted(narrative),
+        "notes": notes,
+    }
