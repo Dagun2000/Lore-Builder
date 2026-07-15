@@ -334,6 +334,8 @@ def _print_result(result: dict) -> None:
         _print(result.get("message", "취소되었습니다."))
     elif status == "no_changes":
         _print("승인된 변경사항이 없어 저장할 내용이 없습니다.")
+    elif status == "entity_only":
+        _print(result.get("message", "엔티티가 저장되었습니다. 별도의 사건 기록은 없습니다."))
     elif status == "saved":
         applied = result.get("applied", [])
         _print("저장 완료: " + ", ".join(_describe_applied(c) for c in applied))

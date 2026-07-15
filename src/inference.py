@@ -168,3 +168,101 @@ def infer_event(resolved_entities: dict, raw_text: str, years: list) -> Inferred
             last_error = exc
 
     raise ValueError(f"사건 추론 결과를 파싱하지 못했습니다: {last_error}")
+
+
+# ---------------------------------------------------------------------------
+# New-entity attribute extraction (Phase 10 patch 2, section A)
+# ---------------------------------------------------------------------------
+
+_ATTRIBUTE_FIELD_ROLES = ("lifecycle_start", "lifecycle_end")
+
+
+def _attribute_candidate_fields(category: str) -> list:
+    """Fields eligible for direct auto-fill on a brand-new entity: lifecycle
+    year markers (role lifecycle_start/end, e.g. founded_year, death_year)
+    plus any other *optional* enum field (e.g. character.gender). Required
+    fields are always forced through the normal field-collection flow
+    instead (never silently auto-filled), and reference/text/list fields are
+    excluded — "explicitly stated" is only reliably checkable for a plain
+    year or a closed set of enum options."""
+    fields = []
+    for f in schema.get_fields(category):
+        if f.get("role") in _ATTRIBUTE_FIELD_ROLES:
+            fields.append(f)
+        elif f["type"] == "enum" and not f.get("required"):
+            fields.append(f)
+    return fields
+
+
+def infer_new_entity_attributes(category: str, tag: str, context_sentence: str, years: list) -> dict:
+    """For a brand-new entity only (never called on an existing one — see
+    pipeline_session._resolve_entity_gen), pull whatever lifecycle years or
+    simple attributes (gender, etc.) the sentence states outright, so they
+    land directly on the entity's fields instead of becoming a spurious
+    duration/point event. Never infers or back-calculates a value — only
+    reports what's explicitly written — and only ever reports a year that's
+    in `years` (this input's own extracted year list), so the caller can
+    safely drop it before Step 3's event-ambiguity judgment runs (otherwise
+    a founding-year mention sitting next to an unrelated event year falsely
+    looks like two different events crammed into one sentence).
+
+    Returns {"attributes": {field_name: value, ...}, "consumed_years": [...]}."""
+    candidate_fields = _attribute_candidate_fields(category)
+    if not candidate_fields or not years:
+        return {"attributes": {}, "consumed_years": []}
+
+    field_lines = []
+    for f in candidate_fields:
+        if f["type"] == "enum":
+            field_lines.append(f"- {f['name']} (선택지: {', '.join(f.get('options') or [])})")
+        else:
+            field_lines.append(f"- {f['name']} (연도, 의미: {f.get('role')})")
+
+    years_text = ", ".join(str(y) for y in years)
+    prompt = (
+        "너는 판타지 세계관 로어 데이터베이스의 신규 엔티티 등록 보조자다.\n"
+        f'새로 등록되는 엔티티: "{tag}" (카테고리: {category})\n'
+        f"원문: {context_sentence}\n"
+        f"문장에서 추출된 연도(들): {years_text}\n\n"
+        "아래 필드 각각에 대해, 문장에 '명시적으로' 쓰인 값이 있을 때만 채워라. 서술로부터 "
+        "추론하거나 역산하지 마라 — 문장에 그대로 나온 값만 인정한다. 연도 필드에 채우는 값은 "
+        "반드시 위 연도 목록 중 하나여야 한다.\n\n"
+        f"필드 목록:\n{chr(10).join(field_lines)}\n\n"
+        "아래 JSON 형식으로만 답하라 (다른 설명 금지):\n"
+        "{\n"
+        '  "attributes": {"필드명": 값, ...},\n'
+        '  "consumed_years": [attributes에 실제로 쓰인 연도들]\n'
+        "}\n"
+        "명시된 값이 하나도 없으면 {\"attributes\": {}, \"consumed_years\": []}로 답하라.\n"
+    )
+
+    try:
+        data = _extract_json(_invoke_llm(prompt))
+    except Exception:
+        return {"attributes": {}, "consumed_years": []}
+
+    valid_years = set(years)
+    raw_attrs = data.get("attributes") or {}
+    attributes = {}
+    for name, value in raw_attrs.items():
+        field_def = next((f for f in candidate_fields if f["name"] == name), None)
+        if field_def is None or value is None:
+            continue
+        if field_def["type"] == "enum":
+            if value in (field_def.get("options") or []):
+                attributes[name] = value
+        else:  # lifecycle year field
+            try:
+                year_value = int(value)
+            except (TypeError, ValueError):
+                continue
+            if year_value in valid_years:
+                attributes[name] = year_value
+
+    consumed = {y for y in (data.get("consumed_years") or []) if y in valid_years}
+    for name, value in attributes.items():
+        field_def = next(f for f in candidate_fields if f["name"] == name)
+        if field_def["type"] != "enum":
+            consumed.add(value)
+
+    return {"attributes": attributes, "consumed_years": sorted(consumed)}

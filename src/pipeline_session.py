@@ -23,7 +23,7 @@ needed, losing them on restart is fine.
 """
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from . import archivist, hard_check, inference, mapping, parser, rag_check, schema, storage
 
@@ -107,15 +107,22 @@ class PipelineSession:
 # ---------------------------------------------------------------------------
 
 def _create_new_entity_gen(
-    session: PipelineSession, inferred_category: str, tag: str, context_sentence: str, year: int
+    session: PipelineSession,
+    inferred_category: str,
+    tag: str,
+    context_sentence: str,
+    year: int,
+    remaining_years: list,
 ):
     """Phase 9 patch A: category is confirmed (or corrected) up front,
     together with the name, before anything else — misclassifying the
     *category* (e.g. a person mistaken for an item) was the real risk, not
     the name, which the LLM rarely gets wrong. "저장 후 계속" commits
-    category+name only, leaving every other field blank; "편집" continues
-    into the full field form (required forced, optional included); "취소"
-    aborts the whole input via EntityCreationCancelled."""
+    category+name plus any auto-filled attributes (see below), skipping only
+    the *optional* fields — required fields are never skippable (Phase 10
+    patch 2, C); "편집" continues into the full field form (required forced,
+    optional included); "취소" aborts the whole input via
+    EntityCreationCancelled."""
     category = inferred_category
 
     while True:
@@ -151,29 +158,55 @@ def _create_new_entity_gen(
 
     entity_id = mapping.generate_entity_id(category, fields.get("name", tag))
 
+    # Phase 10 patch 2 (A): auto-fill lifecycle/attribute fields explicitly
+    # stated in the sentence, for this brand-new entity only — an already-
+    # existing entity never reaches this generator (see _resolve_entity_gen),
+    # so its fields can never be silently changed from chat. Years consumed
+    # this way are popped from `remaining_years` so Step 3's event judgment
+    # never sees them (otherwise a founding-year mention sitting next to an
+    # unrelated event year falsely looks like two separate events).
+    attrs = inference.infer_new_entity_attributes(category, tag, context_sentence, list(remaining_years))
+    for name, value in attrs["attributes"].items():
+        if fields.get(name) is None:
+            fields[name] = value
+    for consumed_year in attrs["consumed_years"]:
+        if consumed_year in remaining_years:
+            remaining_years.remove(consumed_year)
+
     if action == "save":
-        storage.save_entity(category, entity_id, fields)
-        storage.save_to_chroma(entity_id, context_sentence, {"category": category, "tag": tag})
-        return entity_id
+        # "저장 후 계속" skips only the *optional* fields — required fields
+        # (schema `required: true`) can never be skipped, no matter how many
+        # a category has (Phase 10 patch 2, C: this used to only force the
+        # first one via the name field, silently dropping the rest).
+        editable_fields = [
+            f for f in _field_defs_for_widget(category)
+            if f["required"] and fields.get(f["name"]) is None
+        ]
+    else:
+        # action == "edit": full field form below (required forced, optional
+        # included) — also the only path that still asks about terminal
+        # status, as a fallback for softer language the attribute extractor
+        # above wasn't confident enough to fill in directly.
+        if (
+            category == "character"
+            and fields.get("death_year") is None
+            and mapping.infer_terminal_status(context_sentence)
+        ):
+            answer = yield PendingDecision(
+                "entity_terminal_status",
+                {"tag": tag, "entity_id": entity_id, "year": year},
+                {"tag": tag},
+            )
+            if answer == "예":
+                fields["death_year"] = year
+            elif isinstance(answer, dict):
+                fields.update(answer.get("수정") or {})
+            # "아니오" (or anything else unrecognized): no death_year set.
 
-    # action == "edit": full field form below (required forced, optional
-    # included) — this is the only path that still asks about terminal
-    # status, since that too is a form of "editing" the new character.
-    if category == "character" and mapping.infer_terminal_status(context_sentence):
-        answer = yield PendingDecision(
-            "entity_terminal_status",
-            {"tag": tag, "entity_id": entity_id, "year": year},
-            {"tag": tag},
-        )
-        if answer == "예":
-            fields["death_year"] = year
-        elif isinstance(answer, dict):
-            fields.update(answer.get("수정") or {})
-        # "아니오" (or anything else unrecognized): no death_year set.
+        editable_fields = [
+            f for f in _field_defs_for_widget(category) if fields.get(f["name"]) is None
+        ]
 
-    editable_fields = [
-        f for f in _field_defs_for_widget(category) if fields.get(f["name"]) is None
-    ]
     while editable_fields:
         response = yield PendingDecision(
             "entity_required_field",
@@ -204,9 +237,14 @@ def _create_new_entity_gen(
     return entity_id
 
 
-def _resolve_entity_gen(session: PipelineSession, tag: str, context_sentence: str, year: int):
+def _resolve_entity_gen(session: PipelineSession, tag: str, context_sentence: str, remaining_years: list):
+    """`remaining_years` is the whole input's year pool, shared and mutated
+    across every tag in this input — a new entity created here may consume
+    some of it as lifecycle attributes (see _create_new_entity_gen), which
+    is why this is threaded by reference instead of a single primary year."""
     category = mapping.infer_category(tag, context_sentence)
     exact_matches, partial_matches = mapping.find_existing_matches(tag, category)
+    year = remaining_years[0] if remaining_years else None
 
     if len(exact_matches) == 1:
         return exact_matches[0]
@@ -226,11 +264,15 @@ def _resolve_entity_gen(session: PipelineSession, tag: str, context_sentence: st
             {"tag": tag},
         )
         if choice == CREATE_NEW:
-            entity_id = yield from _create_new_entity_gen(session, category, tag, context_sentence, year)
+            entity_id = yield from _create_new_entity_gen(
+                session, category, tag, context_sentence, year, remaining_years
+            )
             return entity_id
         return choice
 
-    entity_id = yield from _create_new_entity_gen(session, category, tag, context_sentence, year)
+    entity_id = yield from _create_new_entity_gen(
+        session, category, tag, context_sentence, year, remaining_years
+    )
     return entity_id
 
 
@@ -330,12 +372,16 @@ def _apply_diff(approved: list) -> list:
 
 def _pipeline_generator(session: PipelineSession):
     parsed = parser.parse_input(session.user_input)
-    primary_year = parsed.years[0]
+    # Shared, mutated pool: a brand-new entity may consume one of these years
+    # as a lifecycle attribute (founded_year, death_year, ...) instead of it
+    # becoming part of an event (Phase 10 patch 2, A) — whatever's left after
+    # entity resolution is what Step 3+ actually judges as "the event".
+    remaining_years = list(parsed.years)
 
     resolved_entities = {}
     for tag in parsed.tags:
         try:
-            entity_id = yield from _resolve_entity_gen(session, tag, parsed.raw_text, primary_year)
+            entity_id = yield from _resolve_entity_gen(session, tag, parsed.raw_text, remaining_years)
         except EntityCreationCancelled as exc:
             return {
                 "status": "cancelled",
@@ -346,7 +392,22 @@ def _pipeline_generator(session: PipelineSession):
         resolved_entities[tag] = entity_id
         session.resolved_entities = dict(resolved_entities)
 
-    inferred_event = inference.infer_event(resolved_entities, parsed.raw_text, parsed.years)
+    if not remaining_years:
+        # Every extracted year was consumed as a lifecycle attribute during
+        # entity creation (e.g. "1900년에 창단된 [세력]은 ...") — there's no
+        # year left to anchor a timeline record to, so there's no event to
+        # judge/check/diff. The entity's attributes were already saved
+        # directly in _create_new_entity_gen; nothing further to do.
+        return {
+            "status": "entity_only",
+            "resolved_entities": resolved_entities,
+            "message": "속성 정보가 엔티티에 직접 저장되었고, 별도의 사건 기록은 생성되지 않았습니다.",
+        }
+
+    event_parsed = replace(parsed, years=remaining_years)
+    primary_year = remaining_years[0]
+
+    inferred_event = inference.infer_event(resolved_entities, parsed.raw_text, remaining_years)
     session.inferred_event = inferred_event
 
     rag_judgments = rag_check.run_rag_checks(
@@ -364,7 +425,7 @@ def _pipeline_generator(session: PipelineSession):
         # main.run_pipeline's identical comment for the "digging up a grave"
         # vs "playing together" example this guards against.
         is_present = inferred_event.entity_presence.get(entity_id, True)
-        extra_years = list(parsed.years) if is_present else None
+        extra_years = list(remaining_years) if is_present else None
         conflicts.extend(hard_check.run_hard_checks(category, entity_id, extra_years=extra_years))
     session.hard_check_conflicts = conflicts
 
@@ -386,7 +447,7 @@ def _pipeline_generator(session: PipelineSession):
             "rag_judgments": rag_judgments,
         }
 
-    diff = archivist.build_diff(parsed, resolved_entities, inferred_event)
+    diff = archivist.build_diff(event_parsed, resolved_entities, inferred_event)
     if isinstance(diff, archivist.ConfirmationNeeded):
         # No partial diff exists to fall back to — ConfirmationNeeded means
         # no single coherent record could be built at all. "계속 진행" can

@@ -166,6 +166,8 @@ def _describe_result(result: dict) -> str:
         return "RAG 검증 결과에 따라 저장이 중단되었습니다."
     if status == "no_changes":
         return "승인된 변경사항이 없어 저장할 내용이 없습니다."
+    if status == "entity_only":
+        return result.get("message", "엔티티가 저장되었습니다. 별도의 사건 기록은 없습니다.")
     if status == "saved":
         applied = result.get("applied", [])
         names = ", ".join(

@@ -97,8 +97,10 @@ def check_rule_violation(raw_text: str, context_docs: list) -> Judgment | None:
     raw = _invoke_llm(prompt)
     data = _extract_json(raw)
     if not data.get("violation"):
+        print("[rag_check] check_rule_violation: 위반 없음")
         return None
 
+    print(f"[rag_check] check_rule_violation: 위반 감지 — {data.get('reason', '')}")
     return Judgment(
         type="rule_violation",
         reason=data.get("reason", ""),
@@ -127,8 +129,19 @@ def check_notes_conflict(entities: list, raw_text: str) -> Judgment | None:
             race_record = storage.get_entity("race", record["race"])
             if race_record and race_record.get("notes"):
                 notes_lines.append(f"{record['race']}: {race_record['notes']}")
+        # Phase 10 patch 2 (B): a constraint often lives only in an event's
+        # notes (e.g. a faction's founding record saying "여성만 가입
+        # 가능"), never on the entity's own `notes` field — since
+        # `relationship` was retired, event_ids/get_events_for_entity is the
+        # only remaining path to that text, and this check never read it.
+        for related_event in storage.get_events_for_entity(entity_id):
+            if related_event.get("notes"):
+                notes_lines.append(
+                    f"{entity_id}의 관련 기록({related_event['id']}): {related_event['notes']}"
+                )
 
     if not notes_lines:
+        print("[rag_check] check_notes_conflict: 참고할 notes가 없어 LLM 호출 생략")
         return None
 
     notes_block = "\n".join(f"- {line}" for line in notes_lines)
@@ -147,8 +160,10 @@ def check_notes_conflict(entities: list, raw_text: str) -> Judgment | None:
     raw = _invoke_llm(prompt)
     data = _extract_json(raw)
     if not data.get("conflict"):
+        print("[rag_check] check_notes_conflict: 모순 없음")
         return None
 
+    print(f"[rag_check] check_notes_conflict: 모순 감지 — {data.get('reason', '')}")
     return Judgment(type="notes_conflict", reason=data.get("reason", ""))
 
 
@@ -215,6 +230,7 @@ def check_status_consistency(entity_id: str, raw_text: str, event_year: int) -> 
 # ---------------------------------------------------------------------------
 
 def run_rag_checks(entities: list, raw_text: str, event_year: int) -> list:
+    print(f"[rag_check] run_rag_checks 호출: entities={entities}, year={event_year}")
     judgments = []
 
     # check_rule_violation gets ONLY the canonical hard-rule texts, not the
