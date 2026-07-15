@@ -243,13 +243,14 @@ def _render_entity_category_and_name(payload: dict) -> dict:
 
 def _render_entity_terminal_status(payload: dict):
     tag, year = payload["tag"], payload["year"]
+    field_name = payload.get("field_name", "death_year")
     answer = _prompt(
         f"[{tag}]가 이 사건({year}년)으로 사망(또는 활동 종료)한 것으로 "
-        f"추정됩니다. death_year={year}로 저장할까요? [예/아니오/수정]: "
+        f"추정됩니다. {field_name}={year}로 저장할까요? [예/아니오/수정]: "
     ).strip()
     if answer == "수정":
-        value = _prompt("새로운 death_year 값 (비우면 설정 안 함): ").strip()
-        return {"수정": ({"death_year": int(value)} if value else {})}
+        value = _prompt(f"새로운 {field_name} 값 (비우면 설정 안 함): ").strip()
+        return {"수정": ({field_name: int(value)} if value else {})}
     return answer
 
 
@@ -277,10 +278,11 @@ def _render_entity_required_field(payload: dict) -> dict:
     return response
 
 
-def _render_multi_event_warning(payload: dict) -> bool:
+def _render_multi_event_warning(payload: dict) -> None:
+    """Nothing gets saved here either way (see pipeline_session's identical
+    comment) — this is purely an acknowledgment, not a choice."""
     _print(f"[확인 필요] {payload['reason']}")
-    answer = _prompt("계속 진행하시겠습니까? [계속 진행/취소]: ").strip()
-    return answer == "계속 진행"
+    _prompt("저장된 내용 없음. 입력을 나눠서 다시 시도해주세요 (Enter로 확인): ")
 
 
 def _render_hard_check_warning(payload: dict) -> str:

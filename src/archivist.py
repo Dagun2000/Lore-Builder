@@ -69,36 +69,48 @@ def _pick_location(resolved_entities: dict) -> str | None:
     )
 
 
-def _next_event_ids(entity_id: str, event_id: str) -> list:
-    category = schema.category_from_id(entity_id)
-    if category is None:
-        return [event_id]
-    entity = storage.get_entity(category, entity_id) or {}
-    current = list(entity.get("event_ids") or [])
-    if event_id not in current:
-        current.append(event_id)
-    return current
-
-
-def _event_pointer_change(entity_id: str, event_id: str) -> ChangeItem | None:
-    category = schema.category_from_id(entity_id)
-    if category is None or category not in _EVENT_POINTER_CATEGORIES:
-        return None
-    return ChangeItem(
-        action="update",
-        category=category,
-        entity_id=entity_id,
-        fields={"event_ids": _next_event_ids(entity_id, event_id)},
-        body=None,
-        reason=f"{entity_id}의 이벤트 기록에 {event_id} 추가",
-    )
-
-
-def _build_point_diff(parsed_input, resolved_entities: dict, inferred_event) -> list:
+def _finalize_pointer_changes(pointer_targets: dict) -> list:
+    """One ChangeItem per entity, folding together every event_id it picked
+    up across every record in this batch (Phase 10 patch 6.5, C). Building
+    these per-record instead — the way a single-record diff always could —
+    would have each ChangeItem computed from the *same* pre-batch DB state
+    and then clobber each other on apply (storage.save_entity replaces the
+    whole field, it doesn't merge), silently dropping every pointer but the
+    last one written for any entity touched by more than one record in the
+    same cohesive scene."""
     changes = []
-    existing_ids = set()
+    for entity_id, event_ids in pointer_targets.items():
+        category = schema.category_from_id(entity_id)
+        if category is None or category not in _EVENT_POINTER_CATEGORIES:
+            continue
+        entity = storage.get_entity(category, entity_id) or {}
+        current = list(entity.get("event_ids") or [])
+        for event_id in event_ids:
+            if event_id not in current:
+                current.append(event_id)
+        changes.append(
+            ChangeItem(
+                action="update",
+                category=category,
+                entity_id=entity_id,
+                fields={"event_ids": current},
+                body=None,
+                reason=f"{entity_id}의 이벤트 기록에 {', '.join(event_ids)} 추가",
+            )
+        )
+    return changes
 
-    timeline_id = generate_id("timeline", inferred_event.event_summary, existing_ids)
+
+def _register_pointer(pointer_targets: dict, entity_id: str, event_id: str) -> None:
+    pointer_targets.setdefault(entity_id, [])
+    if event_id not in pointer_targets[entity_id]:
+        pointer_targets[entity_id].append(event_id)
+
+
+def _build_point_diff(parsed_input, resolved_entities: dict, record, existing_ids: set, pointer_targets: dict) -> list:
+    changes = []
+
+    timeline_id = generate_id("timeline", record.event_summary, existing_ids)
     existing_ids.add(timeline_id)
     year = parsed_input.years[0]
 
@@ -110,24 +122,22 @@ def _build_point_diff(parsed_input, resolved_entities: dict, inferred_event) -> 
             fields={
                 "year": year,
                 "location": _pick_location(resolved_entities),
-                "notes": inferred_event.event_summary,
+                "notes": record.event_summary,
             },
             body=parsed_input.raw_text,
-            reason=f"새 사건 기록: {inferred_event.event_summary}",
+            reason=f"새 사건 기록: {record.event_summary}",
         )
     )
 
-    involved = inferred_event.involved_entities or list(resolved_entities.values())
+    involved = record.involved_entities or list(resolved_entities.values())
     for entity_id in involved:
-        change = _event_pointer_change(entity_id, timeline_id)
-        if change is not None:
-            changes.append(change)
+        _register_pointer(pointer_targets, entity_id, timeline_id)
 
     return changes
 
 
-def _build_duration_diff(parsed_input, inferred_event):
-    effect = inferred_event.duration_effect or {}
+def _build_duration_diff(parsed_input, record, existing_ids: set, pointer_targets: dict):
+    effect = record.duration_effect or {}
     entity_id = effect.get("entity")
     predicate = effect.get("predicate")
     target = effect.get("target")
@@ -139,14 +149,13 @@ def _build_duration_diff(parsed_input, inferred_event):
         )
 
     changes = []
-    existing_ids = set()
 
     if action in ("set", "set_closed"):
         timeline_id = generate_id(
             "timeline", f"{entity_id}_{predicate}_{target or ''}", existing_ids
         )
         existing_ids.add(timeline_id)
-        summary = inferred_event.event_summary or f"{entity_id}의 '{predicate}' 상태/관계"
+        summary = record.event_summary or f"{entity_id}의 '{predicate}' 상태/관계"
         changes.append(
             ChangeItem(
                 action="create",
@@ -165,9 +174,7 @@ def _build_duration_diff(parsed_input, inferred_event):
             )
         )
         for participant in ([entity_id, target] if target else [entity_id]):
-            change = _event_pointer_change(participant, timeline_id)
-            if change is not None:
-                changes.append(change)
+            _register_pointer(pointer_targets, participant, timeline_id)
 
         if predicate == "owns" and target and schema.category_from_id(target) == "artifact":
             changes.append(
@@ -208,10 +215,33 @@ def _build_duration_diff(parsed_input, inferred_event):
 
 
 def build_diff(parsed_input, resolved_entities: dict, inferred_event):
+    """Phase 10 patch 6.5 (C): a cohesive scene (is_single_event True) can
+    carry more than one timeline record — the primary one plus whatever's in
+    inferred_event.additional_records (see inference.infer_event). Every
+    record in the batch shares one `existing_ids` set (so two records don't
+    generate colliding ids in the same run) and one `pointer_targets` map
+    (so an entity touched by more than one record — e.g. a character with
+    both their own duration fact and a role in the shared point event —
+    gets exactly one merged event_ids update instead of N clobbering ones).
+    Any single record failing (e.g. a "clear" with nothing open) aborts the
+    whole batch via ConfirmationNeeded, same contract as the old
+    single-record version."""
     if not inferred_event.is_single_event:
         return ConfirmationNeeded(reason=inferred_event.ambiguity_reason)
 
-    if inferred_event.event_type == "point":
-        return _build_point_diff(parsed_input, resolved_entities, inferred_event)
+    records = [inferred_event] + list(inferred_event.additional_records)
+    changes = []
+    existing_ids = set()
+    pointer_targets = {}
 
-    return _build_duration_diff(parsed_input, inferred_event)
+    for record in records:
+        if record.event_type == "point":
+            result = _build_point_diff(parsed_input, resolved_entities, record, existing_ids, pointer_targets)
+        else:
+            result = _build_duration_diff(parsed_input, record, existing_ids, pointer_targets)
+        if isinstance(result, ConfirmationNeeded):
+            return result
+        changes.extend(result)
+
+    changes.extend(_finalize_pointer_changes(pointer_targets))
+    return changes

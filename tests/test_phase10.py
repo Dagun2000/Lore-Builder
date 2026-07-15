@@ -106,11 +106,14 @@ def test_ambiguous_input_pauses_as_multi_event_warning(monkeypatch):
     assert session.pending_decision.decision_type == "multi_event_warning"
     assert session.pending_decision.payload["reason"] == "테스트용 모호함 사유."
 
-    session = pipeline_session.resume_session(session.session_id, False)
+    # multi_event_warning is a plain acknowledgment now (patch 6.5's UX
+    # follow-up) — nothing gets saved no matter what's sent back, since a
+    # ConfirmationNeeded means no coherent record could be built at all.
+    session = pipeline_session.resume_session(session.session_id, None)
 
     assert session.pending_decision is None
     assert session.stage == "aborted"
-    assert session.result["status"] == "cancelled"
+    assert session.result["status"] == "no_changes"
 
 
 # ---------------------------------------------------------------------------

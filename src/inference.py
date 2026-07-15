@@ -29,6 +29,23 @@ class InferredEvent:
     involved_entities: list = field(default_factory=list)
     duration_effect: dict | None = None
     entity_presence: dict = field(default_factory=dict)
+    # Phase 10 patch 6 (B): entity_id -> True if this event explicitly ends
+    # that entity permanently (death/destruction/disbandment). Lets the
+    # caller offer to update an *existing* entity's terminal field
+    # (death_year, disbanded_year, destroyed_year) as a narrow, explicit
+    # exception to "chat never edits an existing entity's fields" — a brand
+    # new entity handles this at creation time instead (see
+    # inference.infer_new_entity_attributes), so this only matters for
+    # entities that already existed before this input.
+    terminal_entities: dict = field(default_factory=dict)
+    # Phase 10 patch 6.5 (C): a single cohesive scene (is_single_event True)
+    # can still need more than one timeline record — e.g. two different
+    # entities' membership facts plus a shared duel/death. Each item here
+    # has the same shape as this dataclass's own event_type/event_summary/
+    # involved_entities/duration_effect quartet; archivist.build_diff
+    # processes [self] + additional_records uniformly, no record-count cap.
+    # Left empty for the (overwhelmingly common) single-record case.
+    additional_records: list = field(default_factory=list)
     is_single_event: bool = True
     ambiguity_reason: str | None = None
 
@@ -81,7 +98,7 @@ def infer_event(resolved_entities: dict, raw_text: str, years: list) -> Inferred
         "서로 무관한 별개의 사건들이 한 문장에 함께 나열된 경우뿐이다(예: '쟝이 2080년에 "
         "술을 마셨고, 랄프가 2200년에 죽었다' — 완전히 다른 시점, 다른 맥락의 두 사건). "
         "같은 시점의 상태 시작/끝을 함께 서술하는 경우(예: '2000년부터 2010년까지')도 "
-        "정상적인 단일 사건이다. 이 두 예외에 해당하지 않는 한 is_single_event는 항상 "
+        "정상적인 단일 사건이다. 이 예외에 해당하지 않는 한 is_single_event는 항상 "
         "true여야 한다 — 애매하면 false가 아니라 true를 기본값으로 하라. false일 때만 "
         "ambiguity_reason에 이유를 설명하고, 그 경우 다른 필드는 채우지 않아도 된다.\n\n"
         "is_single_event가 true라면, 이 사건이 다음 중 무엇인지 판단하라:\n\n"
@@ -125,6 +142,22 @@ def infer_event(resolved_entities: dict, raw_text: str, years: list) -> Inferred
         "밥은 true, 쟝은 false다(쟝은 이미 죽었을 수 있는 과거의 흔적일 뿐 이 사건에 살아서 "
         "참여하지 않는다 — 다만 이 사건은 쟝과 관련은 있으므로 involved_entities에는 "
         "포함시켜라). '[데이비드]가 [쟝]과 놀았다'에서는 데이비드와 쟝 모두 true다.\n\n"
+        "terminal_entities: 사용 가능한 entity_id 각각에 대해, 이 사건이 그 엔티티의 "
+        "완전하고 돌이킬 수 없는 종료(죽음, 파괴, 해체 등)를 명시적으로 서술하는지(true) "
+        "판단하라. 단순히 다치거나, 위험에 처하거나, 사라졌다(실종)는 정도로는 true가 아니다 "
+        "— 죽음/파괴/해체처럼 명백히 최종적인 서술일 때만 true, 그 외 전부 false.\n\n"
+        "additional_records (하나의 응집된 장면에 레코드가 여러 개 필요한 경우): "
+        "is_single_event가 true인 하나의 응집된 장면이라도, 서로 다른 대상에 대한 여러 "
+        "지속 관계/상태(duration) 사실이 함께 서술되어 있거나, 지속 관계/상태 서술과 별개의 "
+        "point 사건이 같은 장면 안에 함께 있어서, 위의 단일 event_type/duration_effect 필드 "
+        "하나로는 다 담을 수 없는 경우가 있다 — 예: '고트프리는 철왕국 소속이고, 레오파트는 "
+        "아마조네스 소속이며, 둘은 결투해서 죽었다'(같은 장면 안의 소속 관계 2건 + 결투 사건 "
+        "1건). 이런 경우, 가장 핵심적인 사실 하나만 위의 event_type/event_summary/"
+        "involved_entities/duration_effect에 채우고, 나머지 사실들은 additional_records "
+        "배열에 각각 하나의 레코드로 채워라 — 각 항목은 위와 동일한 형태({event_type, "
+        "event_summary, involved_entities, duration_effect})를 가진다. 정보를 조용히 "
+        "버리지 마라 — 장면에 있는 모든 duration/point 사실은 주 레코드나 additional_records "
+        "중 어딘가에 반드시 포함되어야 한다. 추가로 담을 사실이 없으면 빈 배열로 둬라.\n\n"
         "아래 JSON 형식으로만 답하라 (다른 설명 금지):\n"
         "{\n"
         '  "is_single_event": true 또는 false,\n'
@@ -137,7 +170,16 @@ def infer_event(resolved_entities: dict, raw_text: str, years: list) -> Inferred
         '    "action": "set 또는 clear 또는 set_closed",\n'
         '    "start_year": 정수 또는 null, "end_year": 정수 또는 null\n'
         '  } 또는 null,\n'
-        '  "entity_presence": {"entity_id": true 또는 false, ...}\n'
+        '  "entity_presence": {"entity_id": true 또는 false, ...},\n'
+        '  "terminal_entities": {"entity_id": true 또는 false, ...},\n'
+        '  "additional_records": [\n'
+        '    {\n'
+        '      "event_type": "point 또는 duration",\n'
+        '      "event_summary": "point일 때만" 또는 null,\n'
+        '      "involved_entities": ["point일 때만"],\n'
+        '      "duration_effect": { ... 위와 동일한 형태 } 또는 null\n'
+        "    }\n"
+        "  ]\n"
         "}\n"
     )
 
@@ -155,12 +197,24 @@ def infer_event(resolved_entities: dict, raw_text: str, years: list) -> Inferred
                         or "여러 사건 또는 대상이 한 문장에 섞여 있어 하나의 기록으로 만들 수 없습니다."
                     ),
                 )
+            additional_records = [
+                InferredEvent(
+                    event_type=r["event_type"],
+                    event_summary=r.get("event_summary"),
+                    involved_entities=r.get("involved_entities") or [],
+                    duration_effect=r.get("duration_effect"),
+                )
+                for r in (data.get("additional_records") or [])
+                if r.get("event_type") in ("point", "duration")
+            ]
             return InferredEvent(
                 event_type=data["event_type"],
                 event_summary=data.get("event_summary"),
                 involved_entities=data.get("involved_entities") or [],
                 duration_effect=data.get("duration_effect"),
                 entity_presence=data.get("entity_presence") or {},
+                terminal_entities=data.get("terminal_entities") or {},
+                additional_records=additional_records,
                 is_single_event=True,
                 ambiguity_reason=None,
             )

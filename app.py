@@ -229,9 +229,10 @@ def _render_entity_category_and_name(session, decision, key_prefix) -> None:
 
 def _render_entity_terminal_status(session, decision, key_prefix) -> None:
     payload = decision.payload
+    field_name = payload.get("field_name", "death_year")
     st.write(
         f"[{payload['tag']}]가 이 사건({payload['year']}년)으로 사망(또는 활동 종료)한 것으로 "
-        f"추정됩니다. death_year={payload['year']}로 저장할까요?"
+        f"추정됩니다. {field_name}={payload['year']}로 저장할까요?"
     )
     col1, col2, col3 = st.columns(3)
     if col1.button("예", key=f"{key_prefix}_yes"):
@@ -242,10 +243,10 @@ def _render_entity_terminal_status(session, decision, key_prefix) -> None:
         st.session_state[f"{key_prefix}_editing"] = True
     if st.session_state.get(f"{key_prefix}_editing"):
         new_year = st.number_input(
-            "새로운 death_year 값", value=payload["year"], step=1, key=f"{key_prefix}_year"
+            f"새로운 {field_name} 값", value=payload["year"], step=1, key=f"{key_prefix}_year"
         )
-        if st.button("death_year로 저장", key=f"{key_prefix}_edit_confirm"):
-            _resume(session, {"수정": {"death_year": int(new_year)}})
+        if st.button(f"{field_name}로 저장", key=f"{key_prefix}_edit_confirm"):
+            _resume(session, {"수정": {field_name: int(new_year)}})
 
 
 def _render_entity_required_field(session, decision, key_prefix) -> None:
@@ -307,13 +308,14 @@ def _render_diff_review(session, decision, key_prefix) -> None:
 
 
 def _render_multi_event_warning(session, decision, key_prefix) -> None:
+    """Nothing gets saved here either way (see pipeline_session's identical
+    comment) — this is purely an acknowledgment, not a choice between two
+    outcomes that both do the same non-thing."""
     payload = decision.payload
     st.warning(f"[확인 필요] {payload['reason']}")
-    col1, col2 = st.columns(2)
-    if col1.button("계속 진행", key=f"{key_prefix}_proceed"):
-        _resume(session, True)
-    if col2.button("취소", key=f"{key_prefix}_cancel"):
-        _resume(session, False)
+    st.caption("저장된 내용이 없습니다. 입력을 나눠서 다시 시도해주세요.")
+    if st.button("확인", key=f"{key_prefix}_ack"):
+        _resume(session, None)
 
 
 _DECISION_RENDERERS = {

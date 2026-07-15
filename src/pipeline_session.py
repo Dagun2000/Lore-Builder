@@ -231,7 +231,7 @@ def _create_new_entity_gen(
         ):
             answer = yield PendingDecision(
                 "entity_terminal_status",
-                {"tag": tag, "entity_id": entity_id, "year": year},
+                {"tag": tag, "entity_id": entity_id, "year": year, "field_name": "death_year"},
                 {"tag": tag},
             )
             if answer == "예":
@@ -517,21 +517,16 @@ def _pipeline_generator(session: PipelineSession):
     diff = archivist.build_diff(event_parsed, resolved_entities, inferred_event)
     if isinstance(diff, archivist.ConfirmationNeeded):
         # No partial diff exists to fall back to — ConfirmationNeeded means
-        # no single coherent record could be built at all. "계속 진행" can
-        # only mean "acknowledge and stop here without saving anything" (the
-        # user re-submits as separate, clearer inputs); "취소" reaches the
-        # same outcome, just labeled as an explicit cancel rather than a
-        # shrug.
-        proceed = yield PendingDecision("multi_event_warning", {"reason": diff.reason}, {})
-        if proceed:
-            return {
-                "status": "no_changes",
-                "stage": "confirmation",
-                "resolved_entities": resolved_entities,
-                "message": diff.reason,
-            }
+        # no single coherent record could be built at all, and nothing gets
+        # saved no matter how the user responds. A "계속 진행"/"취소" choice
+        # here used to lead to the exact same no-op outcome either way
+        # (just a different status label) — genuinely confusing, since
+        # picking "계속 진행" looks like it should do something. This is now
+        # a single acknowledgment: the user re-submits as separate, clearer
+        # inputs.
+        yield PendingDecision("multi_event_warning", {"reason": diff.reason}, {})
         return {
-            "status": "cancelled",
+            "status": "no_changes",
             "stage": "confirmation",
             "resolved_entities": resolved_entities,
             "message": diff.reason,
@@ -550,6 +545,49 @@ def _pipeline_generator(session: PipelineSession):
         }
 
     applied = _apply_diff(approved)
+
+    # Phase 10 patch 6 (B): a narrow, explicit exception to "chat never
+    # edits an existing entity's fields" — an existing entity's terminal
+    # field (death_year/disbanded_year/destroyed_year) is the one thing
+    # hard_check's terminal-violation logic depends on, and almost nobody
+    # sets it by hand in the detail panel; the event narrating that entity's
+    # end is already being saved above regardless of the answer here, this
+    # only asks whether to *additionally* reflect it on the entity itself.
+    # A brand-new entity never reaches this (its own creation flow already
+    # handles this — see infer_new_entity_attributes / the entity_terminal_
+    # status fallback above), so only pre-existing entities are asked.
+    terminal_updates = {}
+    for tag, entity_id in resolved_entities.items():
+        if entity_id in session.newly_created_entities:
+            continue
+        if not inferred_event.terminal_entities.get(entity_id):
+            continue
+        category = schema.category_from_id(entity_id)
+        if category is None:
+            continue
+        end_fields = schema.get_fields_with_role(category, "lifecycle_end")
+        if not end_fields:
+            continue
+        end_field = end_fields[0]["name"]
+        entity = storage.get_entity(category, entity_id)
+        if entity is None or entity.get(end_field) is not None:
+            continue  # already set — nothing to reconcile
+
+        answer = yield PendingDecision(
+            "entity_terminal_status",
+            {"tag": tag, "entity_id": entity_id, "year": primary_year, "field_name": end_field},
+            {"tag": tag},
+        )
+        if answer == "예":
+            storage.save_entity(category, entity_id, {end_field: primary_year})
+            terminal_updates[entity_id] = {end_field: primary_year}
+        elif isinstance(answer, dict):
+            update = answer.get("수정") or {}
+            if update:
+                storage.save_entity(category, entity_id, update)
+                terminal_updates[entity_id] = update
+        # "아니오" (or anything else unrecognized): field left untouched.
+
     return {
         "status": "saved",
         "parsed": parsed,
@@ -560,6 +598,7 @@ def _pipeline_generator(session: PipelineSession):
         "diff": diff,
         "approved": approved,
         "applied": applied,
+        "terminal_updates": terminal_updates,
     }
 
 
