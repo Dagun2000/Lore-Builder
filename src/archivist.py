@@ -175,18 +175,9 @@ def _build_duration_diff(parsed_input, record, existing_ids: set, pointer_target
         )
         for participant in ([entity_id, target] if target else [entity_id]):
             _register_pointer(pointer_targets, participant, timeline_id)
-
-        if predicate == "owns" and target and schema.category_from_id(target) == "artifact":
-            changes.append(
-                ChangeItem(
-                    action="update",
-                    category="artifact",
-                    entity_id=target,
-                    fields={"current_owner": entity_id},
-                    body=None,
-                    reason=f"{target}의 current_owner 캐시를 최신 소유 기록으로 갱신",
-                )
-            )
+        # No artifact.current_owner cache to refresh anymore (Phase 10
+        # patch 7 follow-up) — storage.get_current_holder computes the
+        # current owner on read from this exact duration record instead.
 
     else:  # clear
         open_records = [

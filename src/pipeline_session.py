@@ -342,7 +342,7 @@ def _review_hard_check_conflicts_gen(conflicts: list):
             if c.check_type == "lifespan":
                 storage.save_entity("character", c.entity_id, {"lifespan_check_ack": True})
             continue
-        return False  # "수정" / "취소" / anything else
+        return False  # "취소" (or anything else unrecognized)
 
     return True
 
@@ -364,7 +364,7 @@ def _review_rag_judgments_gen(judgments: list):
         )
         if answer == "그래도 저장":
             continue
-        return False  # "수정" / "취소" / anything else
+        return False  # "취소" (or anything else unrecognized)
 
     return True
 

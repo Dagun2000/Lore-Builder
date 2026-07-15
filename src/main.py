@@ -287,12 +287,12 @@ def _render_multi_event_warning(payload: dict) -> None:
 
 def _render_hard_check_warning(payload: dict) -> str:
     _print(f"[경고] {payload['entity_id']}: {payload['reason']}")
-    return _prompt("그래도 저장하시겠습니까? [그래도 저장/수정/취소]: ").strip()
+    return _prompt("그래도 저장하시겠습니까? [그래도 저장/취소]: ").strip()
 
 
 def _render_rag_judgment(payload: dict) -> str:
     _print(f"[{payload['judgment_type']}] {payload['reason']}")
-    return _prompt("그래도 저장하시겠습니까? [그래도 저장/수정/취소]: ").strip()
+    return _prompt("그래도 저장하시겠습니까? [그래도 저장/취소]: ").strip()
 
 
 def _render_diff_review(payload: dict) -> bool:

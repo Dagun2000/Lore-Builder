@@ -112,22 +112,25 @@ faction:
 artifact:
   id_prefix: item_
   fields:
-    # required: name, current_status / optional: current_owner,
-    # origin_event, destroyed_year, notes, event_ids
+    # required: name / optional: origin_event, destroyed_year, notes,
+    # event_ids
+    # current_status was removed (Phase 10 patch 7, D) — it was a static
+    # snapshot field that directly contradicted the event-centric design
+    # principle ("current state is computed from events, not stored").
+    # destroyed -> destroyed_year (role: lifecycle_end, same mechanism as
+    # character.death_year); lost -> a reversible duration status
+    # (predicate: lost, see status_effects.yaml), cleared when the item is
+    # found again; possessed/unknown are just the absence of the above,
+    # computed on read via storage.get_current_state, never stored.
+    # current_owner was removed too (Phase 10 patch 7 follow-up) — it was
+    # kept as a deliberate "auto-refreshed cache" exception at first, but
+    # that's still a stored "current" snapshot, which the user decided
+    # shouldn't exist anywhere at all, cache or not. Who owns an artifact
+    # right now is computed on read via storage.get_current_holder(item_id,
+    # "owns"), the reverse of get_current_state — never stored, never
+    # hand-edited, no cache to go stale.
     - name: name
       type: text
-      required: true
-    # Cached, not authoritative — always re-derived from the latest
-    # predicate:"owns" duration event touching this artifact at save time
-    # (see archivist.build_diff), never hand-edited independently of that.
-    - name: current_owner
-      type: reference
-      ref_category: character
-      required: false
-      role: ownership
-    - name: current_status
-      type: enum
-      options: [possessed, lost, destroyed, unknown]
       required: true
     - name: origin_event
       type: reference

@@ -37,6 +37,7 @@ def _init_session_state() -> None:
         "detail_new_value": None,
         "detail_flag_selection": {},
         "detail_confirm_delete": False,
+        "dict_category_persist": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -266,26 +267,26 @@ def _render_entity_required_field(session, decision, key_prefix) -> None:
 
 
 def _render_hard_check_warning(session, decision, key_prefix) -> None:
+    """Phase 10 patch 7 (E): "수정" used to sit between these two buttons
+    but never actually offered any editing — it just fell through to the
+    same rejection "그래도 저장"'s absence already causes. Two honest
+    options instead of three, one of which lied about what it did."""
     payload = decision.payload
     st.warning(f"[{payload['entity_id']}] {payload['reason']}")
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     if col1.button("그래도 저장", key=f"{key_prefix}_accept"):
         _resume(session, "그래도 저장")
-    if col2.button("수정", key=f"{key_prefix}_revise"):
-        _resume(session, "수정")
-    if col3.button("취소", key=f"{key_prefix}_cancel"):
+    if col2.button("취소", key=f"{key_prefix}_cancel"):
         _resume(session, "취소")
 
 
 def _render_rag_judgment(session, decision, key_prefix) -> None:
     payload = decision.payload
     st.warning(f"[{payload['judgment_type']}] {payload['reason']}")
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     if col1.button("그래도 저장", key=f"{key_prefix}_accept"):
         _resume(session, "그래도 저장")
-    if col2.button("수정", key=f"{key_prefix}_revise"):
-        _resume(session, "수정")
-    if col3.button("취소", key=f"{key_prefix}_cancel"):
+    if col2.button("취소", key=f"{key_prefix}_cancel"):
         _resume(session, "취소")
 
 
@@ -389,9 +390,20 @@ def render_sidebar_search() -> None:
 
 
 def render_dictionary_mode() -> None:
+    """Phase 10 patch 7 (G): Streamlit drops a widget's Session State entry
+    at the end of any run where that widget wasn't instantiated — and this
+    selectbox isn't instantiated at all while an entity detail screen is
+    open (render_entity_detail returns before render_dictionary_mode ever
+    runs), so "dict_category" was silently wiped every time, and coming
+    back here always re-created the selectbox at its default (index 0,
+    "character"). dict_category_persist lives outside any widget's
+    lifecycle, so it survives the round trip and can drive `index=` here."""
     st.header("딕셔너리")
     categories = schema.list_categories()
-    category = st.selectbox("카테고리", categories, key="dict_category")
+    remembered = st.session_state.dict_category_persist
+    default_index = categories.index(remembered) if remembered in categories else 0
+    category = st.selectbox("카테고리", categories, index=default_index, key="dict_category")
+    st.session_state.dict_category_persist = category
 
     entities = storage.list_entities(category)
     if not entities:
@@ -425,9 +437,13 @@ def _render_current_state_section(entity_id: str) -> None:
 
 
 def _render_related_events_section(entity_id: str) -> None:
-    """Always-visible full listing (Phase 10 patch section 8) — replaces
-    the old field-specific "관련 기록 검색" button; event_ids is exact and
-    complete, so there's no ranking step left to gate behind a click."""
+    """Shown only once a field edit is actually attempted (Phase 10 patch 7,
+    F) — an always-visible listing regardless of intent turned out to be
+    more noise than help; "필드 값 검토" (which sets detail_searched) is the
+    signal that the user is genuinely trying to change something on this
+    entity, not just browsing. The listing itself is still full recall via
+    event_ids (storage.get_events_for_entity), not similarity search — that
+    part was already correct, just gated wrong."""
     st.subheader("관련 이벤트")
     related_docs = field_update.find_related_context(entity_id)
     if not related_docs:
@@ -507,6 +523,13 @@ def _render_field_editor_section(category: str, entity_id: str, entity: dict) ->
             st.write(f"- [{c.check_type}] {c.entity_id}: {c.reason}")
     for c in warnings:
         st.warning(f"[{c.check_type}] {c.entity_id}: {c.reason}")
+    if not conflicts and field_def.get("role") in ("lifecycle_start", "lifecycle_end"):
+        # Phase 10 patch 7 follow-up: a lifecycle field's only meaningful
+        # "related event" question is "does this value conflict with a
+        # recorded year" — hard_check already answers that above when it
+        # fires. When it doesn't, say so explicitly instead of leaving a
+        # blank gap where a warning would otherwise have been.
+        st.success("타임라인 충돌이 감지되지 않았습니다.")
 
     if st.button("저장", key="detail_save", disabled=bool(blocking)):
         if not field_update.is_structured_field(category, selected_field):
@@ -572,9 +595,25 @@ def render_entity_detail(entity_id: str) -> None:
 
     if category in _EVENT_POINTER_CATEGORIES:
         _render_current_state_section(entity_id)
-        _render_related_events_section(entity_id)
 
     _render_field_editor_section(category, entity_id, entity)
+
+    # "관련 이벤트" only once a field edit is actually attempted this
+    # session (detail_searched, set by "필드 값 검토" below) — see
+    # _render_related_events_section's docstring. Lifecycle fields
+    # (birth_year/death_year/founded_year/...) are excluded even then: the
+    # only thing "related events" could mean there is "does this year
+    # conflict with a recorded event", and hard_check already answers that
+    # directly above (see _render_field_editor_section's success/warning
+    # messages) — a full event listing under a year field is noise, not a
+    # different signal.
+    selected_field_def = next(
+        (f for f in schema.get_fields(category) if f["name"] == st.session_state.get("detail_field_name")),
+        None,
+    )
+    is_lifecycle_field = bool(selected_field_def and selected_field_def.get("role") in ("lifecycle_start", "lifecycle_end"))
+    if category in _EVENT_POINTER_CATEGORIES and st.session_state.get("detail_searched") and not is_lifecycle_field:
+        _render_related_events_section(entity_id)
     _render_delete_entity_section(category, entity_id)
 
 

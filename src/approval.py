@@ -25,7 +25,7 @@ def review_hard_check_conflicts(conflicts: list) -> bool:
 
     for c in [c for c in conflicts if c.severity == "warning"]:
         _print(f"[경고] {c.entity_id}: {c.reason}")
-        answer = _prompt("그래도 저장하시겠습니까? [그래도 저장/수정/취소]: ").strip()
+        answer = _prompt("그래도 저장하시겠습니까? [그래도 저장/취소]: ").strip()
 
         if answer == "그래도 저장":
             if c.check_type == "lifespan":
@@ -36,10 +36,9 @@ def review_hard_check_conflicts(conflicts: list) -> bool:
                     "character", c.entity_id, {"lifespan_check_ack": True}
                 )
             continue
-        if answer == "수정":
-            _print("입력을 다시 확인해주세요.")
-            return False
-        # "취소" or anything unrecognized: stop.
+        # "취소" or anything unrecognized: stop. ("수정" was removed — Phase
+        # 10 patch 7, E — it never offered any actual editing, it just
+        # silently did the exact same thing as "취소".)
         _print("저장이 취소되었습니다.")
         return False
 
@@ -53,13 +52,10 @@ def review_rag_judgments(judgments: list) -> bool:
             continue
 
         _print(f"[{j.type}] {j.reason}")
-        answer = _prompt("그래도 저장하시겠습니까? [그래도 저장/수정/취소]: ").strip()
+        answer = _prompt("그래도 저장하시겠습니까? [그래도 저장/취소]: ").strip()
 
         if answer == "그래도 저장":
             continue
-        if answer == "수정":
-            _print("입력을 다시 확인해주세요.")
-            return False
         _print("저장이 취소되었습니다.")
         return False
 

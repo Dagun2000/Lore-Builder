@@ -230,6 +230,34 @@ def get_current_state(entity_id: str, predicate: str, year: int | None = None) -
     return active_targets
 
 
+def get_current_holder(target_id: str, predicate: str = "owns", year: int | None = None) -> str | None:
+    """Reverse of get_current_state: which entity currently has `predicate`
+    pointed *at* target_id (e.g. who currently owns this artifact), computed
+    from duration records on read. Replaces artifact.current_owner (Phase 10
+    patch 7 follow-up) — there is no stored "current" field/cache anywhere
+    for this, on the same principle that removed artifact.current_status:
+    current state is a query, not a column. Returns None if nothing's open
+    (or, if `year` is given, nothing covers that year)."""
+    candidates = [
+        r for r in get_duration_records(target_id, predicate) if r.get("target") == target_id
+    ]
+    active = []
+    for record in candidates:
+        start = record.get("start_year")
+        if start is None:
+            continue
+        end = record.get("end_year")
+        is_active = (end is None) if year is None else (start <= year and (end is None or year <= end))
+        if is_active:
+            active.append((start, record.get("entity")))
+    if not active:
+        return None
+    # If somehow more than one is open at once, the most recently started
+    # one wins — matches how a "set" duration event is meant to supersede
+    # whatever came before it.
+    return max(active, key=lambda pair: pair[0])[1]
+
+
 def add_event_pointer(entity_id: str, event_id: str) -> None:
     """Add event_id to entity_id.event_ids, deduped."""
     category = category_from_id(entity_id)

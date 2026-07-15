@@ -9,3 +9,5 @@ status_effects:
     label: 저주받음
   - id: incapacitated
     label: 부상/중태
+  - id: lost
+    label: 분실
