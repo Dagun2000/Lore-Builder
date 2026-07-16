@@ -109,9 +109,17 @@ def infer_event(resolved_entities: dict, raw_text: str, years: list) -> Inferred
         if identity_lines else "(참고할 엔티티 정보 없음)"
     )
     valid_ids = ", ".join(resolved_entities.values())
+    all_status_effects = schema.load_status_effects()
     status_effect_options = "\n".join(
-        f"- {s['id']} ({s['label']})" for s in schema.load_status_effects()
+        f"- {s['id']} ({s['label']})"
+        for s in all_status_effects
+        if s.get("type", "individual") == "individual"
     )
+    relational_predicate_options = "\n".join(
+        f"- {s['id']} ({s['label']})"
+        for s in all_status_effects
+        if s.get("type") == "relational"
+    ) or "(등록된 관계형 predicate 없음)"
     years_text = ", ".join(str(y) for y in years)
 
     prompt = (
@@ -189,7 +197,10 @@ def infer_event(resolved_entities: dict, raw_text: str, years: list) -> Inferred
         "(start_year=작은 연도, end_year=큰 연도)\n\n"
         "duration_effect.predicate: 대상이 없어도 되는 개인 상태(수감, 봉인 등)라면 아래 "
         f"목록의 id 중 하나를 써야 한다:\n{status_effect_options}\n"
-        "대상이 있는 관계(소속, 적대, 아는 사이 등)라면 predicate는 자유 텍스트로 써라.\n\n"
+        "대상이 있는 관계(소속, 적대, 아는 사이 등)라면, 이미 등록된 관계형 predicate 목록을 "
+        f"먼저 확인하고 상황에 맞는 것이 있으면 재사용하라:\n{relational_predicate_options}\n"
+        "마땅히 재사용할 것이 없을 때만 새로운 predicate 이름을 자유롭게 만들어라 — 새 이름은 "
+        "이후 별도 확인 절차를 거쳐 목록에 등록되므로, 지어내는 것 자체는 괜찮다.\n\n"
         "duration_effect.target: predicate의 성격과 무관하게 target을 항상 채울 수 있는지 "
         "먼저 시도하라. 문장에 이 상태/사건의 대상(누가/어디서/무엇에 의해 등)이 명시되어 "
         "있고 그 대상이 이미 확정된 엔티티라면 반드시 target에 그 entity_id를 채운다 — "

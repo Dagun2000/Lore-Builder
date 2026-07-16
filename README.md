@@ -8,7 +8,7 @@ Lore Builder takes a single line describing something that just happened in your
 
 It keeps two kinds of knowledge in sync: structured facts in SQLite (entities and the timeline of events, ongoing relationships, and reversible statuses connecting them) and free-form descriptions in a Chroma vector store, so related lore can be found by meaning rather than by exact ID.
 
-There's no separate "relationship" table — every point-in-time occurrence and every ongoing relationship or personal status is a single `timeline` record, referenced from each entity it involves. An entity never stores a "current state" snapshot (no `current_owner`, no `current_status`); anything like that is computed on read from the timeline instead, since the world has no fixed notion of "now" — years can be entered in any order, spanning any range.
+Every point-in-time occurrence and every ongoing relationship or personal status is a single `timeline` record, referenced from each entity it involves. An entity never stores a "current state" snapshot (no `current_owner`, no `current_status`); anything like that is computed on read from the timeline instead, since the world has no fixed notion of "now" — years can be entered in any order, spanning any range.
 
 ## Features
 
@@ -32,7 +32,7 @@ There's no separate "relationship" table — every point-in-time occurrence and 
 ```bash
 python -m venv .venv
 source .venv/Scripts/activate    # Windows: .venv\Scripts\activate
-pip install langchain-openai chromadb streamlit pyyaml python-dotenv pytest
+pip install -r requirements.txt
 ```
 
 ## Configuration

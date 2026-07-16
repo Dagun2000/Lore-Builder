@@ -92,7 +92,29 @@ def entity_field_summary(record: dict) -> str | None:
     return ", ".join(parts) if parts else None
 
 
-def _entity_context_lines(entities: list) -> list:
+def _duration_activity_annotation(related_event: dict, event_year: int) -> str | None:
+    """[활성]/[비활성] tag for a duration-type related event (has a
+    start_year), computed the same way storage.get_current_state does —
+    Phase 10 patch 15, A: a duration record's notes ("2010년에 추방당했다")
+    read as an unconditional current fact to an LLM with no year sense of
+    its own, so a 2009 event (before the exile even started) was judged
+    against a status that, at that point in the story, hadn't happened yet.
+    Returns None for a point event (no start_year — always relevant,
+    nothing to gate) or when there's no event_year to compare against."""
+    start = related_event.get("start_year")
+    if start is None or event_year is None:
+        return None
+    end = related_event.get("end_year")
+    is_active = start <= event_year and (end is None or event_year <= end)
+    span = f"{start}~{end if end is not None else '현재'}"
+    if is_active:
+        return f"[활성, 기간 {span}, 이 사건({event_year}년) 기준]"
+    if event_year < start:
+        return f"[비활성 — 기간 {span}이지만 이 사건({event_year}년)은 그 이전]"
+    return f"[비활성 — 기간 {span}, 이 사건({event_year}년)은 이미 해제된 이후]"
+
+
+def _entity_context_lines(entities: list, event_year: int | None = None) -> list:
     """Each involved entity's own stored fields + notes (including any
     self-declared exception) + its race's notes + its related events' notes
     — the exact context `check_notes_conflict` has built since Phase 10
@@ -101,7 +123,13 @@ def _entity_context_lines(entities: list) -> list:
     the condition, or carry an explicit exception" context, or an
     already-saved qualifying value (e.g. a mana circle count) and a
     self-declared exception (e.g. "체질상 마나 서클 없이도 마법 가능") both go
-    invisible the moment the current sentence doesn't restate them."""
+    invisible the moment the current sentence doesn't restate them.
+
+    `event_year`, when given, gets each duration-type related event tagged
+    with a [활성]/[비활성] annotation (Phase 10 patch 15, A) so the LLM
+    doesn't have to (mis)infer temporal relevance from prose alone — a
+    status recorded as starting in 2010 is irrelevant, not a violation, for
+    an event dated 2009."""
     lines = []
     for entity_id in entities:
         category = schema.category_from_id(entity_id)
@@ -127,10 +155,13 @@ def _entity_context_lines(entities: list) -> list:
         # `relationship` was retired, event_ids/get_events_for_entity is the
         # only remaining path to that text, and this check never read it.
         for related_event in storage.get_events_for_entity(entity_id):
-            if related_event.get("notes"):
-                lines.append(
-                    f"{entity_id}의 관련 기록({related_event['id']}): {related_event['notes']}"
-                )
+            if not related_event.get("notes"):
+                continue
+            annotation = _duration_activity_annotation(related_event, event_year)
+            prefix = f"{annotation} " if annotation else ""
+            lines.append(
+                f"{entity_id}의 관련 기록({related_event['id']}): {prefix}{related_event['notes']}"
+            )
     return lines
 
 
@@ -138,9 +169,11 @@ def _entity_context_lines(entities: list) -> list:
 # 2-2. World-rule violation
 # ---------------------------------------------------------------------------
 
-def check_rule_violation(entities: list, raw_text: str, context_docs: list) -> Judgment | None:
+def check_rule_violation(
+    entities: list, raw_text: str, context_docs: list, event_year: int | None = None
+) -> Judgment | None:
     docs = "\n".join(f"- {d}" for d in context_docs) if context_docs else "(관련 규칙 없음)"
-    context_lines = _entity_context_lines(entities)
+    context_lines = _entity_context_lines(entities, event_year)
     entity_context = (
         "\n".join(f"- {line}" for line in context_lines)
         if context_lines else "(참고할 엔티티 정보 없음)"
@@ -152,6 +185,10 @@ def check_rule_violation(entities: list, raw_text: str, context_docs: list) -> J
         f"세계관 규칙/문서:\n{docs}\n\n"
         f"관여 엔티티의 기존 저장 정보(자기 예외 조항 포함):\n{entity_context}\n\n"
         f"사건 문장: {raw_text}\n\n"
+        "관련 기록 중 [활성]/[비활성] 표시가 붙은 것은 이 사건의 연도를 기준으로 이미 계산된 "
+        "결과다 — [비활성]으로 표시된 기록(아직 시작 전이거나 이미 해제된 상태/관계)은 이 "
+        "사건 시점에는 적용되지 않으므로, 그 기록 자체만을 근거로 위반이라고 판단하지 마라 "
+        "(단, 다른 무관한 이유로 위반이 있다면 그건 별개로 정상 판단하라).\n\n"
         "규칙이 특정 전제조건(도구, 자격, 재료 등)을 요구하는데, 사건 문장에 그 전제조건이 "
         "충족되었다는 언급이 전혀 없다면 — 굳이 결여를 명시하지 않았더라도 — 위반 가능성이 "
         "있는 것으로 판단하라. 단, 위 '관여 엔티티의 기존 저장 정보'에 그 전제조건이 이미 "
@@ -195,8 +232,8 @@ def check_rule_violation(entities: list, raw_text: str, context_docs: list) -> J
 # 2-3. Notes-based qualitative conflict
 # ---------------------------------------------------------------------------
 
-def check_notes_conflict(entities: list, raw_text: str) -> Judgment | None:
-    notes_lines = _entity_context_lines(entities)
+def check_notes_conflict(entities: list, raw_text: str, event_year: int | None = None) -> Judgment | None:
+    notes_lines = _entity_context_lines(entities, event_year)
 
     if not notes_lines:
         print("[rag_check] check_notes_conflict: 참고할 notes가 없어 LLM 호출 생략")
@@ -207,6 +244,10 @@ def check_notes_conflict(entities: list, raw_text: str) -> Judgment | None:
     prompt = (
         "너는 판타지 세계관의 설정 감사관이다. 아래는 관련 엔티티들의 기존 설정(notes)이다. "
         "새로 입력된 사건 문장이 이 설정과 모순되는지 판단하라.\n\n"
+        "관련 기록 중 [활성]/[비활성] 표시가 붙은 것은 이 사건의 연도를 기준으로 이미 계산된 "
+        "결과다 — [비활성]으로 표시된 기록(아직 시작 전이거나 이미 해제된 상태/관계)은 이 "
+        "사건 시점에는 적용되지 않으므로, 그 기록 자체만을 근거로 모순이라고 판단하지 마라 "
+        "(단, 다른 무관한 이유로 모순이 있다면 그건 별개로 정상 판단하라).\n\n"
         "명시적 규칙 위반뿐 아니라, 서술된 성격·위험도·상관관계와 행동/속성 사이의 모순도 "
         "확인하라:\n"
         "1. 관련 엔티티(장소, 사물, 시스템 등)의 notes/규칙에 성격·용도·제약·상관관계를 "
@@ -269,7 +310,14 @@ def check_status_consistency(entity_id: str, raw_text: str, event_year: int) -> 
     the LLM call entirely rather than asking it to judge against a status
     that (from the timeline's perspective) hadn't started yet, or had
     already ended, when this event happened."""
-    status_ids = [s["id"] for s in schema.load_status_effects()]
+    # Phase 10 patch 16: status_effects.yaml now also holds target-bearing
+    # relational predicates (exiled, ...) alongside personal statuses — this
+    # check is specifically about the latter (its prompt has no notion of a
+    # target to reason about), so relational entries are excluded here, not
+    # just historically absent.
+    status_ids = [
+        s["id"] for s in schema.load_status_effects() if s.get("type", "individual") == "individual"
+    ]
     active_effects = [
         sid for sid in status_ids if storage.get_current_state(entity_id, sid, event_year)
     ]
@@ -352,11 +400,11 @@ def run_rag_checks(entities: list, raw_text: str, event_year: int) -> list:
     # actual violation went undetected. retrieve_context() stays available
     # as a general-purpose utility, just not fed into this specific check.
     hard_rule_docs = _get_hard_rule_texts()
-    rule_judgment = check_rule_violation(entities, raw_text, hard_rule_docs)
+    rule_judgment = check_rule_violation(entities, raw_text, hard_rule_docs, event_year)
     if rule_judgment is not None:
         judgments.append(rule_judgment)
 
-    notes_judgment = check_notes_conflict(entities, raw_text)
+    notes_judgment = check_notes_conflict(entities, raw_text, event_year)
     if notes_judgment is not None:
         judgments.append(notes_judgment)
 

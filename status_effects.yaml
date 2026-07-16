@@ -1,15 +1,22 @@
 status_effects:
 - id: sealed
   label: 봉인
+  type: individual
 - id: imprisoned
   label: 수감
+  type: individual
 - id: missing
   label: 실종
+  type: individual
 - id: cursed
   label: 저주받음
+  type: individual
 - id: incapacitated
   label: 부상/중태
+  type: individual
 - id: lost
   label: 분실
+  type: individual
 - id: exiled
   label: 추방
+  type: relational

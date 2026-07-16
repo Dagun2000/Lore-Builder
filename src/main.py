@@ -295,6 +295,27 @@ def _render_rag_judgment(payload: dict) -> str:
     return _prompt("그래도 저장하시겠습니까? [그래도 저장/취소]: ").strip()
 
 
+def _render_new_relational_predicate(payload: dict) -> dict:
+    """Phase 10 patch 16, A: Step 3 proposed a target-bearing (relational)
+    predicate that isn't in status_effects.yaml yet — 저장 registers it
+    as-is, 수정 lets the user rename it before registering, 취소 drops just
+    this duration record (any other record from the same input, e.g. a
+    point event, still saves independently)."""
+    _print(
+        f'"{payload["predicate"]}"라는 새로운 관계를 상태/관계 목록에 추가할까요? '
+        f'({payload.get("entity_id")} -> {payload.get("target_id")})'
+    )
+    if payload.get("reason"):
+        _print(f"  맥락: {payload['reason']}")
+    answer = _prompt("[저장/수정/취소]: ").strip()
+    if answer == "수정":
+        name = _prompt(f'새 이름 (비우면 "{payload["predicate"]}" 그대로): ').strip()
+        return {"action": "edit", "name": name}
+    if answer == "저장":
+        return {"action": "save"}
+    return {"action": "cancel"}
+
+
 def _render_diff_review(payload: dict) -> bool:
     """One bundled decision for the whole diff (Phase 10 patch) — the
     primary record plus whichever other entities get an event_ids/cache
@@ -317,6 +338,7 @@ _DECISION_RENDERERS = {
     "hard_check_warning": _render_hard_check_warning,
     "rag_judgment": _render_rag_judgment,
     "multi_event_warning": _render_multi_event_warning,
+    "new_relational_predicate": _render_new_relational_predicate,
     "diff_review": _render_diff_review,
 }
 

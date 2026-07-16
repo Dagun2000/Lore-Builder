@@ -37,21 +37,31 @@ def _save_status_effects(effects: list) -> None:
     load_status_effects.cache_clear()
 
 
-def add_status_effect(effect_id: str, label: str) -> None:
-    """Append a new reversible status to status_effects.yaml (a fixed set
-    the world's rules/inference/checks all read from — imprisoned, cursed,
-    ...) and bust the lru_cache so the running process sees it immediately.
-    A GUI-editable set, since a setting's cast of reversible statuses isn't
-    something the code should hardcode — a future/sci-fi world might add
-    "cryosleep" the same way a fantasy one added "imprisoned"."""
+_STATUS_EFFECT_TYPES = ("individual", "relational")
+
+
+def add_status_effect(effect_id: str, label: str, type_: str = "individual") -> None:
+    """Append a new reversible status/relation to status_effects.yaml (a
+    fixed set the world's rules/inference/checks all read from — imprisoned,
+    cursed, ... and, since Phase 10 patch 16, target-bearing relational
+    predicates like exiled/enemy_of too, distinguished by `type`) and bust
+    the lru_cache so the running process sees it immediately. GUI-editable
+    (and, for relational predicates, also grown automatically the first
+    time inference proposes a genuinely new one — see
+    pipeline_session._resolve_relational_predicates_gen), since a setting's
+    cast of statuses/relations isn't something the code should hardcode — a
+    future/sci-fi world might add "cryosleep" the same way a fantasy one
+    added "imprisoned"."""
     effect_id = (effect_id or "").strip()
     label = (label or "").strip()
     if not effect_id or not label:
         raise ValueError("id와 label은 비워둘 수 없습니다.")
+    if type_ not in _STATUS_EFFECT_TYPES:
+        raise ValueError(f"알 수 없는 유형입니다: {type_!r}")
     effects = load_status_effects()
     if any(e["id"] == effect_id for e in effects):
         raise ValueError(f"이미 존재하는 상태 효과 id입니다: {effect_id}")
-    _save_status_effects(effects + [{"id": effect_id, "label": label}])
+    _save_status_effects(effects + [{"id": effect_id, "label": label, "type": type_}])
 
 
 def remove_status_effect(effect_id: str) -> None:

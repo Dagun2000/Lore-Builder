@@ -37,6 +37,7 @@ _STAGE_BY_DECISION = {
     "hard_check_warning": "hard_checking",
     "rag_judgment": "rag_checking",
     "multi_event_warning": "confirming_event",
+    "new_relational_predicate": "confirming_event",
     "diff_review": "reviewing_diff",
 }
 
@@ -400,6 +401,57 @@ def _review_diff_gen(diff: list):
     return diff if answer else []
 
 
+def _resolve_relational_predicates_gen(inferred_event):
+    """Phase 10 patch 16, A: a duration record with a `target` is a
+    relational predicate (patch 14 established target-presence as exactly
+    the relational signal) — like a personal status, its predicate name
+    should come from a maintained registry (status_effects.yaml,
+    type: relational) instead of Step 3 inventing a fresh string every
+    time. When inference.infer_event proposes a predicate not already in
+    that registry, pause here for a save/edit/cancel confirmation before
+    it's allowed into the diff. Walks [inferred_event] + its
+    additional_records (patch 6.5's multi-record scene mechanism) so a
+    cancelled relational fact doesn't block any other record from the same
+    cohesive scene (e.g. the point event describing the same action) —
+    returns the surviving records, primary first."""
+    known_relational = {
+        e["id"] for e in schema.load_status_effects() if e.get("type") == "relational"
+    }
+    all_records = [inferred_event] + list(inferred_event.additional_records)
+    kept = []
+    for record in all_records:
+        effect = record.duration_effect
+        if not (
+            record.event_type == "duration"
+            and effect
+            and effect.get("target")
+            and effect.get("predicate") not in known_relational
+        ):
+            kept.append(record)
+            continue
+
+        proposed = effect["predicate"]
+        response = yield PendingDecision(
+            "new_relational_predicate",
+            {
+                "predicate": proposed,
+                "entity_id": effect.get("entity"),
+                "target_id": effect.get("target"),
+                "reason": record.event_summary or "",
+            },
+            {},
+        )
+        action = (response or {}).get("action") if isinstance(response, dict) else None
+        if action in (None, "cancel"):
+            continue  # this record is dropped; the rest of the batch still saves
+        final_name = (response.get("name") or "").strip() or proposed
+        schema.add_status_effect(final_name, final_name, "relational")
+        known_relational.add(final_name)
+        effect["predicate"] = final_name
+        kept.append(record)
+    return kept
+
+
 def _apply_diff(approved: list) -> list:
     creates = [c for c in approved if c.action == "create"]
     updates = [c for c in approved if c.action == "update"]
@@ -496,6 +548,25 @@ def _pipeline_generator(session: PipelineSession):
     primary_year = remaining_years[0]
 
     inferred_event = inference.infer_event(resolved_entities, parsed.raw_text, remaining_years)
+    session.inferred_event = inferred_event
+
+    kept_records = yield from _resolve_relational_predicates_gen(inferred_event)
+    if not kept_records:
+        return {
+            "status": "no_changes",
+            "stage": "confirmation",
+            "resolved_entities": resolved_entities,
+            "message": "확인되지 않은 관계로 인해 저장할 내용이 없습니다.",
+        }
+    primary, *rest = kept_records
+    inferred_event = replace(
+        inferred_event,
+        event_type=primary.event_type,
+        event_summary=primary.event_summary,
+        involved_entities=primary.involved_entities,
+        duration_effect=primary.duration_effect,
+        additional_records=rest,
+    )
     session.inferred_event = inferred_event
 
     rag_judgments = rag_check.run_rag_checks(

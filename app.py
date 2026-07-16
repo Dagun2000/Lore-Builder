@@ -303,6 +303,36 @@ def _render_rag_judgment(session, decision, key_prefix) -> None:
         _resume(session, "취소")
 
 
+def _render_new_relational_predicate(session, decision, key_prefix) -> None:
+    """Phase 10 patch 16, A: Step 3 proposed a target-bearing (relational)
+    predicate not yet in status_effects.yaml — 저장 registers it as-is,
+    수정 (two-step, same pattern as _render_entity_terminal_status) lets the
+    user rename it first, 취소 drops just this duration record (any other
+    record from the same input, e.g. a point event, still saves
+    independently)."""
+    payload = decision.payload
+    st.write(
+        f'"{payload["predicate"]}"라는 새로운 관계를 상태/관계 목록에 추가할까요? '
+        f'({payload.get("entity_id")} → {payload.get("target_id")})'
+    )
+    if payload.get("reason"):
+        st.caption(payload["reason"])
+
+    col1, col2, col3 = st.columns(3)
+    if col1.button("저장", key=f"{key_prefix}_save"):
+        _resume(session, {"action": "save"})
+    if col2.button("수정", key=f"{key_prefix}_edit_toggle"):
+        st.session_state[f"{key_prefix}_editing"] = True
+        st.rerun()
+    if col3.button("취소", key=f"{key_prefix}_cancel"):
+        _resume(session, {"action": "cancel"})
+
+    if st.session_state.get(f"{key_prefix}_editing"):
+        new_name = st.text_input("새 이름", value=payload["predicate"], key=f"{key_prefix}_name")
+        if st.button("이 이름으로 저장", key=f"{key_prefix}_edit_confirm"):
+            _resume(session, {"action": "edit", "name": new_name})
+
+
 def _render_diff_review(session, decision, key_prefix) -> None:
     """One bundled decision for the whole diff (Phase 10 patch) — the
     primary record plus whichever other entities get an event_ids/cache
@@ -338,6 +368,7 @@ _DECISION_RENDERERS = {
     "entity_terminal_status": _render_entity_terminal_status,
     "entity_required_field": _render_entity_required_field,
     "multi_event_warning": _render_multi_event_warning,
+    "new_relational_predicate": _render_new_relational_predicate,
     "hard_check_warning": _render_hard_check_warning,
     "rag_judgment": _render_rag_judgment,
     "diff_review": _render_diff_review,
@@ -417,78 +448,101 @@ def _dictionary_label(category: str, entity: dict) -> str:
     return entity.get("name") or entity["id"]
 
 
-_STATUS_EFFECTS_PSEUDO_CATEGORY = "상태 효과"
+_STATUS_EFFECTS_PSEUDO_CATEGORY = "Relations/Status"
+
+_STATUS_EFFECT_TYPE_LABELS = {
+    "individual": "개인 상태 (대상 없음)",
+    "relational": "관계형 (대상 있음)",
+}
 
 
-def _status_effect_usage_count(effect_id: str) -> int:
+def _status_effect_usage_count(effect_id: str, effect_type: str) -> int:
     """How many timeline duration records currently use effect_id as their
-    (target-less, personal-status) predicate — shown before deletion so
-    removing a status doesn't silently orphan existing records from every
-    check/dropdown that reads status_effects.yaml going forward."""
+    predicate — shown before deletion so removing one doesn't silently
+    orphan existing records from every check/dropdown that reads
+    status_effects.yaml going forward. Phase 10 patch 16: individual
+    (target-less) and relational (target-bearing) entries are counted by
+    the matching side of that same target-presence signal."""
+    matches_target = (lambda t: t is None) if effect_type == "individual" else (lambda t: t is not None)
     return sum(
         1
         for e in storage.list_entities("timeline")
-        if e.get("predicate") == effect_id and e.get("target") is None
+        if e.get("predicate") == effect_id and matches_target(e.get("target"))
     )
 
 
 def _render_status_effects_panel() -> None:
-    """A GUI-editable status_effects.yaml (Phase 10 patch 14) — the set of
-    reversible statuses (imprisoned, cursed, ...) a world can have is a
-    setting-specific choice, not something the code should hardcode; a
-    sci-fi setting might add "cryosleep" the same way a fantasy one added
-    "imprisoned". Lives as a pseudo-category in the dictionary rather than a
-    real schema_registry.yaml category, since status effects aren't
-    entities — they never get their own id/detail screen, just this list."""
+    """A GUI-editable status_effects.yaml (Phase 10 patch 14, extended
+    patch 16 with a type split) — the set of reversible statuses
+    (imprisoned, cursed, ...) *and* target-bearing relational predicates
+    (exiled, enemy_of, ...) a world can have is a setting-specific choice,
+    not something the code should hardcode; a sci-fi setting might add
+    "cryosleep" the same way a fantasy one added "imprisoned", and a new
+    relational fact (patch 16, A) grows this list automatically the first
+    time Step 3 proposes one that isn't here yet. Lives as a pseudo-category
+    in the dictionary rather than a real schema_registry.yaml category,
+    since these aren't entities — they never get their own id/detail
+    screen, just this list."""
     st.write(
-        "세계관에서 쓸 수 있는, 되돌릴 수 있는 상태(수감, 저주 등)의 목록입니다. "
-        "새 사건 입력이나 필드 수정 화면에서 바로 선택지로 나타납니다."
+        "세계관에서 쓸 수 있는, 되돌릴 수 있는 개인 상태(수감, 저주 등)와 대상이 있는 "
+        "관계형 predicate(추방, 적대 등)의 목록입니다. 새 사건 입력이나 필드 수정 화면에서 "
+        "바로 선택지로 나타납니다."
     )
 
     effects = schema.load_status_effects()
     pending = st.session_state.status_effect_confirm_delete
 
-    for effect in effects:
-        effect_id = effect["id"]
-        col1, col2 = st.columns([4, 1])
-        col1.write(f"**{effect_id}** ({effect['label']})")
+    for effect_type, type_label in _STATUS_EFFECT_TYPE_LABELS.items():
+        st.subheader(type_label)
+        typed_effects = [e for e in effects if e.get("type", "individual") == effect_type]
+        if not typed_effects:
+            st.caption("(없음)")
 
-        if pending != effect_id:
-            if col2.button("삭제", key=f"status_effect_delete_{effect_id}"):
-                st.session_state.status_effect_confirm_delete = effect_id
+        for effect in typed_effects:
+            effect_id = effect["id"]
+            col1, col2 = st.columns([4, 1])
+            col1.write(f"**{effect_id}** ({effect['label']})")
+
+            if pending != effect_id:
+                if col2.button("삭제", key=f"status_effect_delete_{effect_id}"):
+                    st.session_state.status_effect_confirm_delete = effect_id
+                    st.rerun()
+                continue
+
+            usage = _status_effect_usage_count(effect_id, effect_type)
+            if usage:
+                st.warning(
+                    f"현재 {usage}건의 기록이 이 항목을 사용하고 있습니다. 삭제해도 그 기록 "
+                    "자체는 남지만, 앞으로 선택지에 나타나지 않고 관련 검증 대상에서도 "
+                    "빠지게 됩니다."
+                )
+            confirm_col1, confirm_col2 = st.columns(2)
+            if confirm_col1.button("그대로 삭제", key=f"status_effect_delete_confirm_{effect_id}"):
+                schema.remove_status_effect(effect_id)
+                st.session_state.status_effect_confirm_delete = None
+                st.success(f"'{effect_id}' 항목을 삭제했습니다.")
                 st.rerun()
-            continue
-
-        usage = _status_effect_usage_count(effect_id)
-        if usage:
-            st.warning(
-                f"현재 {usage}건의 기록이 이 상태를 사용하고 있습니다. 삭제해도 그 기록 "
-                "자체는 남지만, 앞으로 선택지에 나타나지 않고 상태 일관성 검증 대상에서도 "
-                "빠지게 됩니다."
-            )
-        confirm_col1, confirm_col2 = st.columns(2)
-        if confirm_col1.button("그대로 삭제", key=f"status_effect_delete_confirm_{effect_id}"):
-            schema.remove_status_effect(effect_id)
-            st.session_state.status_effect_confirm_delete = None
-            st.success(f"'{effect_id}' 상태를 삭제했습니다.")
-            st.rerun()
-        if confirm_col2.button("취소", key=f"status_effect_delete_cancel_{effect_id}"):
-            st.session_state.status_effect_confirm_delete = None
-            st.rerun()
+            if confirm_col2.button("취소", key=f"status_effect_delete_cancel_{effect_id}"):
+                st.session_state.status_effect_confirm_delete = None
+                st.rerun()
 
     st.divider()
-    st.subheader("새 상태 추가")
+    st.subheader("새 항목 추가")
     with st.form("status_effect_add_form", clear_on_submit=True):
         new_id = st.text_input("id (코드에서 predicate로 쓰일 값, 영문 권장)", key="status_effect_new_id")
         new_label = st.text_input("표시 이름", key="status_effect_new_label")
+        new_type = st.selectbox(
+            "유형", list(_STATUS_EFFECT_TYPE_LABELS.values()), key="status_effect_new_type"
+        )
         submitted = st.form_submit_button("추가", key="status_effect_add")
     if submitted:
+        type_value = next(k for k, v in _STATUS_EFFECT_TYPE_LABELS.items() if v == new_type)
         try:
-            schema.add_status_effect(new_id, new_label)
+            schema.add_status_effect(new_id, new_label, type_value)
         except ValueError as exc:
             st.error(str(exc))
         else:
-            st.success(f"'{new_id}' ({new_label}) 상태를 추가했습니다.")
+            st.success(f"'{new_id}' ({new_label}) 항목을 추가했습니다.")
             st.rerun()
 
 
