@@ -14,7 +14,7 @@ the goal is being able to repeat every CLI test scenario through the GUI.
 
 import streamlit as st
 
-from src import archivist, deletion, field_update, flags, hard_check, pipeline_session, schema, storage
+from src import deletion, field_update, flags, hard_check, pipeline_session, schema, storage
 
 _NAME_BEARING_CATEGORIES = ("character", "location", "faction", "artifact", "race")
 
@@ -578,13 +578,11 @@ def _render_save_section(category: str, entity_id: str, selected_field: str) -> 
                 flags.add_flag(flagged_entity_id, flagged_from)
                 flagged_count += 1
 
-        cleared = flags.clear_flags_for_entity(entity_id)
+        flags.clear_flags_for_entity(entity_id)
 
         message = "저장 완료."
         if flagged_count:
             message += f" {flagged_count}건 플래그 등록."
-        if cleared:
-            message += f" 이 엔티티에 걸려있던 플래그 {cleared}건이 자동 해제됐습니다."
         st.success(message)
 
         st.session_state.detail_searched = False
@@ -647,21 +645,36 @@ def _participant_label(entity_id: str) -> str:
 
 
 def _render_timeline_detail(entity_id: str, entity: dict) -> None:
-    """Phase 10 patch 8, section 4 — "editing" an event is internally a
-    delete-and-recreate (deletion.delete_event to unhook every current
-    participant's pointer, then the same create path archivist itself
-    uses), because a partial patch can't fix the event's own id (a
-    content-derived slug) or resync participants added/removed mid-edit.
-    Verification is hard_check only — rag_check's LLM judgments are Step
-    4's save-time contradiction checks for *new* input, redundant (and
-    potentially confusing) for a human who already reviewed this exact
-    record via the relevant-context search and chose to fix it directly.
-    No gating on how you got here — reachable from the dictionary's
-    "timeline" category or from a relevant-context match, whichever came
-    first."""
+    """Phase 10 patch 8, section 4 (rolled back by patch 11, A) — "editing"
+    an event used to be a delete-and-recreate, on the reasoning that a
+    partial patch couldn't fix the event's own id (a content-derived slug).
+    That churned the id on every edit, which broke anything that had
+    captured the old id directly — most concretely, a flag on this event
+    (flags.py keys off entity_id) went stale and orphaned the moment the
+    event got "fixed," the opposite of what flagging something for a later
+    look is for. The id is just an internal identifier, same as any other
+    entity's — it doesn't need to keep matching the event's current content,
+    any more than a character's id needs to keep matching their current
+    name after a rename. So this edits the row in place, same id throughout:
+    `storage.save_entity`/`save_to_chroma` overwrite the existing record,
+    and only the *participant* pointers get reconciled (diffed against who
+    was already pointing at this event_id before the edit) since who's
+    involved can genuinely change — everyone else's pointer to this id
+    stays untouched and valid. Verification is still hard_check only —
+    rag_check's LLM judgments are Step 4's save-time contradiction checks
+    for *new* input, redundant (and potentially confusing) for a human who
+    already reviewed this exact record via the relevant-context search and
+    chose to fix it directly. No gating on how you got here — reachable
+    from the dictionary's "timeline" category or from a relevant-context
+    match, whichever came first."""
     is_point = entity.get("year") is not None or entity.get("entity") is None
     candidates = _participant_options()
     labels_by_id = {eid: _participant_label(eid) for eid in candidates}
+
+    if is_point:
+        previous_participants = [eid for _cat, eid in storage.find_entities_referencing_event(entity_id)]
+    else:
+        previous_participants = [p for p in (entity.get("entity"), entity.get("target")) if p]
 
     st.subheader("이벤트 수정")
     if is_point:
@@ -673,9 +686,8 @@ def _render_timeline_detail(entity_id: str, entity: dict) -> None:
         loc_choice = st.selectbox("장소", loc_labels, index=loc_index, key=f"tl_loc_{entity_id}")
         new_location = None if loc_choice == "(없음)" else loc_ids[loc_labels.index(loc_choice) - 1]
 
-        current_participants = [eid for _cat, eid in storage.find_entities_referencing_event(entity_id)]
         selected_participants = st.multiselect(
-            "참가자", candidates, default=[p for p in current_participants if p in candidates],
+            "참가자", candidates, default=[p for p in previous_participants if p in candidates],
             format_func=lambda eid: labels_by_id.get(eid, eid), key=f"tl_participants_{entity_id}",
         )
     else:
@@ -741,18 +753,21 @@ def _render_timeline_detail(entity_id: str, entity: dict) -> None:
     if not conflicts:
         st.success("하드체크 충돌이 감지되지 않았습니다.")
 
-    if st.button("저장 (기존 이벤트 삭제 후 재생성)", key=f"tl_save_{entity_id}", disabled=bool(blocking)):
-        deletion.delete_event(entity_id)
-        new_id = archivist.generate_id("timeline", pending["fields"].get("notes") or entity_id, set())
-        storage.save_entity("timeline", new_id, pending["fields"])
-        storage.save_to_chroma(new_id, pending["fields"].get("notes") or "", {"category": "timeline"})
-        for participant in pending["participants"]:
-            storage.add_event_pointer(participant, new_id)
+    if st.button("저장", key=f"tl_save_{entity_id}", disabled=bool(blocking)):
+        storage.save_entity("timeline", entity_id, pending["fields"])
+        storage.save_to_chroma(entity_id, pending["fields"].get("notes") or "", {"category": "timeline"})
+
+        new_participants = set(pending["participants"])
+        for participant in set(previous_participants) - new_participants:
+            storage.remove_event_pointer(participant, entity_id)
+        for participant in new_participants - set(previous_participants):
+            storage.add_event_pointer(participant, entity_id)
+
+        flags.clear_flags_for_entity(entity_id)
 
         st.session_state.pop(review_key, None)
         st.session_state.pop(pending_key, None)
-        st.success(f"이벤트가 갱신되었습니다: {entity_id} → {new_id}")
-        _navigate_to_entity(new_id)
+        st.success("이벤트가 갱신되었습니다.")
         st.rerun()
 
     st.subheader("이벤트 삭제")
