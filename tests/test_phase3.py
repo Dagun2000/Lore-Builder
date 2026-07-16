@@ -44,7 +44,7 @@ def test_check_status_consistency_detects_conflict():
 def test_check_rule_violation_detects_magic_without_mana_stone():
     hard_rule_docs = rag_check._get_hard_rule_texts()
 
-    judgment = rag_check.check_rule_violation("손끝에서 불꽃을 만들어냈다.", hard_rule_docs)
+    judgment = rag_check.check_rule_violation([], "손끝에서 불꽃을 만들어냈다.", hard_rule_docs)
 
     assert judgment is not None
     assert judgment.type == "rule_violation"
@@ -70,6 +70,6 @@ def test_no_false_positives_for_mundane_event():
     hard_rule_docs = rag_check._get_hard_rule_texts()
     combined_docs = list(dict.fromkeys(context_docs + hard_rule_docs))
 
-    assert rag_check.check_rule_violation(raw_text, combined_docs) is None
+    assert rag_check.check_rule_violation(["char_mira"], raw_text, combined_docs) is None
     assert rag_check.check_notes_conflict(["char_mira"], raw_text) is None
     assert rag_check.check_status_consistency("char_mira", raw_text, 2100) is None
