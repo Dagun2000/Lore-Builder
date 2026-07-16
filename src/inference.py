@@ -19,7 +19,7 @@ import json
 import re
 from dataclasses import dataclass, field
 
-from . import config, schema
+from . import config, schema, storage
 
 
 @dataclass
@@ -68,9 +68,45 @@ def _extract_json(raw: str) -> dict:
     return json.loads(match.group(0))
 
 
+_ENTITY_IDENTITY_EXCLUDED = {"id", "name", "event_ids", "lifespan_check_ack"}
+
+
+def _entity_identity_lines(resolved_entities: dict) -> list:
+    """Each resolved entity's own stored category + fields + notes (Phase 10
+    patch 13, A) — Step 3 used to judge event_type/predicate purely from the
+    raw sentence, with zero visibility into what a destination/object
+    actually IS (e.g. a location whose notes say "세계에서 가장 거대한
+    감옥이다"), so a neutral verb like "끌려갔다" never registered as an
+    imprisonment no matter where the entity was taken. Deliberately a small,
+    local helper rather than reusing rag_check.entity_field_summary — Step 3
+    and Step 4 stay independent modules even though the flattening logic is
+    similar; this is an event-type/predicate judgment, not a contradiction
+    check."""
+    lines = []
+    for tag, entity_id in resolved_entities.items():
+        category = schema.category_from_id(entity_id)
+        if category is None:
+            continue
+        record = storage.get_entity(category, entity_id)
+        if not record:
+            continue
+        parts = [f"분류={category}"] + [
+            f"{name}={value}"
+            for name, value in record.items()
+            if name not in _ENTITY_IDENTITY_EXCLUDED and value not in (None, "", [])
+        ]
+        lines.append(f"{entity_id} (\"{tag}\"): " + ", ".join(parts))
+    return lines
+
+
 def infer_event(resolved_entities: dict, raw_text: str, years: list) -> InferredEvent:
     entity_list = "\n".join(
         f'- "{tag}" -> {entity_id}' for tag, entity_id in resolved_entities.items()
+    )
+    identity_lines = _entity_identity_lines(resolved_entities)
+    identity_block = (
+        "\n".join(f"- {line}" for line in identity_lines)
+        if identity_lines else "(참고할 엔티티 정보 없음)"
     )
     valid_ids = ", ".join(resolved_entities.values())
     status_effect_options = "\n".join(
@@ -84,6 +120,7 @@ def infer_event(resolved_entities: dict, raw_text: str, years: list) -> Inferred
         "duration_effect의 entity/target과 involved_entities는 반드시 아래 목록의 "
         "entity_id만 사용하라.\n\n"
         f"확정된 엔티티:\n{entity_list}\n\n"
+        f"엔티티 정체성 정보(이미 저장된 분류/필드/notes):\n{identity_block}\n\n"
         f"사용 가능한 entity_id: {valid_ids}\n\n"
         f"원문: {raw_text}\n"
         f"문장에서 추출된 연도(들): {years_text}\n\n"
@@ -127,6 +164,15 @@ def infer_event(resolved_entities: dict, raw_text: str, years: list) -> Inferred
         "그냥 point로 판단하라. 이 신중함은 다른 상태(수감, 봉인, 저주, 부상/중태)에도 "
         "동일하게 적용된다 — 상태 변화 동사가 명확할 때만 duration으로 판단하고, 조금이라도 "
         "불확실하면 point를 기본값으로 하라.\n\n"
+        "단, 위의 '동사가 명확할 때만'이라는 기준에는 중요한 예외가 있다: 사건에 언급된 "
+        "장소/사물이 이미 저장된 카테고리나 notes를 가지고 있다면(위 '엔티티 정체성 정보' "
+        "참고), 그 정체성이 이번 행동의 성격을 암시하는지 확인하라. 예를 들어 목적지가 "
+        "\"감옥\"으로 저장되어 있다면, \"끌려갔다\"/\"보내졌다\"/\"이송되었다\"처럼 투옥을 "
+        "직접 명시하지 않는 중립적인 동사라도, 그 목적지로 이동시켰다는 서술 자체가 실질적으로는 "
+        "수감(duration, set, predicate=imprisoned) 상태 변화를 의미한다. 동사 자체가 "
+        "명시적인지 여부보다 행선지/대상의 정체성이 실질적으로 무엇을 의미하는지를 우선하라 — "
+        "단 그 장소/사물에 그런 정체성을 암시하는 저장된 정보가 전혀 없다면, 중립적인 동사만으로 "
+        "duration을 추정하지 말고 그냥 point로 판단하라.\n\n"
         "duration이면 action을 다음 중 하나로 판단하라:\n"
         "  - set: 연도가 하나이고, 새로운 상태/관계가 이 연도에 시작됨 (end_year는 없음)\n"
         "  - clear: 연도가 하나이고, 기존 상태/관계가 이 연도에 끝남 (예: '풀려났다', "
