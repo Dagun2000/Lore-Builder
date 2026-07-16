@@ -36,6 +36,7 @@ def _init_session_state() -> None:
         "detail_related_docs": [],
         "detail_new_value": None,
         "detail_flag_selection": {},
+        "detail_relevant_show_all": False,
         "detail_confirm_delete": False,
         "dict_category_persist": None,
     }
@@ -68,6 +69,7 @@ def _navigate_to_entity(entity_id) -> None:
     st.session_state.detail_conflicts = []
     st.session_state.detail_related_docs = []
     st.session_state.detail_flag_selection = {}
+    st.session_state.detail_relevant_show_all = False
     st.session_state.detail_confirm_delete = False
     st.session_state.selected_entity = entity_id
 
@@ -438,27 +440,54 @@ def render_dictionary_mode() -> None:
 _EVENT_POINTER_CATEGORIES = ("character", "location", "faction", "artifact", "race")
 
 
-def _render_relevant_context_section(entity_id: str, field_name: str, new_value) -> None:
+_RELEVANT_CONTEXT_SHOW_TOP = 3
+
+
+def _render_relevant_context_section(entity_id: str, field_name: str, new_value) -> list:
     """Phase 10 patch 8 — replaces the old "dump every event this entity
     points at" panel (which showed a destroyed_year edit dawnblade's own
     forging event, etc.) with field_update.find_relevant_context: a 1-hop
     walk to *other* entities sharing an event with this one, judged for
-    relevance to *this specific edit* by a single batched LLM call. Manual
-    flagging is gone too — direct access to any event via the dictionary's
-    "timeline" category (see _render_timeline_detail) means there's no
-    longer a need for a "flag it for later" workaround (patch 8, section 4)."""
+    relevance to *this specific edit* by a single batched LLM call.
+
+    Phase 10 patch 11, A: per-item flag checkboxes and top-N/"더보기"
+    pagination (mirroring field_update.py's CLI flow, _print_related_context/
+    _flag_related_docs) were dropped when this panel was rewritten for the
+    1-hop search in patch 8 — restored here. Checkbox state is written
+    straight into st.session_state.detail_flag_selection so the save button
+    below (_render_save_section) can register flags for whatever's checked
+    without this function needing to return anything itself; the return
+    value is only for the "관련 기록이 없습니다" caller-side check.
+    """
     st.subheader("관련 기록")
     matches = field_update.find_relevant_context(entity_id, field_name, new_value)
     if not matches:
         st.write("관련성이 있어 보이는 기록이 없습니다.")
-        return
+        return matches
 
-    for match in matches:
+    show_all = st.session_state.detail_relevant_show_all
+    visible = matches if show_all else matches[:_RELEVANT_CONTEXT_SHOW_TOP]
+    remaining = 0 if show_all else len(matches) - len(visible)
+
+    for match in visible:
         st.write(f"**{match.entity_id}**")
         st.caption(match.reason)
-        if st.button(f"{match.entity_id} 상세 보기", key=f"relctx_{entity_id}_{field_name}_{match.entity_id}"):
-            _navigate_to_entity(match.entity_id)
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            st.session_state.detail_flag_selection[match.entity_id] = st.checkbox(
+                "플래그", key=f"flag_{entity_id}_{field_name}_{match.entity_id}"
+            )
+        with col2:
+            if st.button(f"{match.entity_id} 상세 보기", key=f"relctx_{entity_id}_{field_name}_{match.entity_id}"):
+                _navigate_to_entity(match.entity_id)
+                st.rerun()
+
+    if remaining:
+        if st.button(f"더 보기 ({remaining}건 더 있음)", key=f"relctx_more_{entity_id}_{field_name}"):
+            st.session_state.detail_relevant_show_all = True
             st.rerun()
+
+    return matches
 
 
 def _render_field_editor_section(category: str, entity_id: str, entity: dict) -> None:
@@ -474,6 +503,8 @@ def _render_field_editor_section(category: str, entity_id: str, entity: dict) ->
         st.session_state.detail_previous_value = entity.get(selected_field)
         st.session_state.detail_searched = False
         st.session_state.detail_conflicts = []
+        st.session_state.detail_flag_selection = {}
+        st.session_state.detail_relevant_show_all = False
 
     field_def = next(f for f in field_defs if f["name"] == selected_field)
     new_value = _render_value_field(
@@ -489,6 +520,8 @@ def _render_field_editor_section(category: str, entity_id: str, entity: dict) ->
             st.session_state.detail_conflicts = []
         st.session_state.detail_new_value = new_value
         st.session_state.detail_searched = True
+        st.session_state.detail_flag_selection = {}
+        st.session_state.detail_relevant_show_all = False
         st.rerun()
 
     if not st.session_state.detail_searched:
@@ -512,15 +545,52 @@ def _render_field_editor_section(category: str, entity_id: str, entity: dict) ->
         # blank gap where a warning would otherwise have been.
         st.success("타임라인 충돌이 감지되지 않았습니다.")
 
+    # The actual "저장" button lives after the relevant-context section
+    # below (see _render_save_section) — Phase 10 patch 11, A: flagging a
+    # related record and saving the field value must happen together in one
+    # click, so the button can't be rendered until the flag checkboxes exist.
+
+
+def _render_save_section(category: str, entity_id: str, selected_field: str) -> None:
+    """The field-editor's actual commit step (Phase 10 patch 11, A) — split
+    out from _render_field_editor_section so it can render after the
+    relevant-context section's flag checkboxes exist, and register both in
+    one click: the new field value, any items checked "플래그" above (via
+    flags.add_flag, same flagged_from convention field_update.py's CLI flow
+    uses), and — the part that had gone missing entirely, not just the
+    checkboxes — auto-clearing whatever flags were already sitting against
+    this entity (flags.clear_flags_for_entity), same as the CLI's
+    update_field_flow does on every successful save."""
+    conflicts = st.session_state.detail_conflicts
+    blocking = [c for c in conflicts if c.severity == "blocking"]
+    warnings = [c for c in conflicts if c.severity == "warning"]
+
     if st.button("저장", key="detail_save", disabled=bool(blocking)):
         if not field_update.is_structured_field(category, selected_field):
             storage.save_entity(category, entity_id, {selected_field: st.session_state.detail_new_value})
         if any(c.check_type == "lifespan" for c in warnings):
             storage.save_entity("character", entity_id, {"lifespan_check_ack": True})
 
-        st.success("저장 완료.")
+        flagged_from = f"{entity_id}의 {selected_field} 수정 중 발견"
+        flagged_count = 0
+        for flagged_entity_id, checked in st.session_state.detail_flag_selection.items():
+            if checked:
+                flags.add_flag(flagged_entity_id, flagged_from)
+                flagged_count += 1
+
+        cleared = flags.clear_flags_for_entity(entity_id)
+
+        message = "저장 완료."
+        if flagged_count:
+            message += f" {flagged_count}건 플래그 등록."
+        if cleared:
+            message += f" 이 엔티티에 걸려있던 플래그 {cleared}건이 자동 해제됐습니다."
+        st.success(message)
+
         st.session_state.detail_searched = False
         st.session_state.detail_conflicts = []
+        st.session_state.detail_flag_selection = {}
+        st.session_state.detail_relevant_show_all = False
         st.rerun()
 
 
@@ -736,10 +806,12 @@ def render_entity_detail(entity_id: str) -> None:
         None,
     )
     is_lifecycle_field = bool(selected_field_def and selected_field_def.get("role") in ("lifecycle_start", "lifecycle_end"))
-    if category in _EVENT_POINTER_CATEGORIES and st.session_state.get("detail_searched") and not is_lifecycle_field:
-        _render_relevant_context_section(
-            entity_id, st.session_state.detail_field_name, st.session_state.detail_new_value
-        )
+    if st.session_state.get("detail_searched"):
+        if category in _EVENT_POINTER_CATEGORIES and not is_lifecycle_field:
+            _render_relevant_context_section(
+                entity_id, st.session_state.detail_field_name, st.session_state.detail_new_value
+            )
+        _render_save_section(category, entity_id, st.session_state.detail_field_name)
     _render_delete_entity_section(category, entity_id)
 
 
