@@ -23,10 +23,12 @@ def test_parse_input_extracts_multiple_years():
 
 
 def test_parse_input_ignores_years_inside_brackets():
-    import pytest
-
-    with pytest.raises(ValueError):
-        parser.parse_input("[100년 전쟁]에서 사건이 있었다.")
+    # A year is no longer required at parse time (Phase 10 patch 3, E) — a
+    # bracketed pseudo-year like "[100년 전쟁]" correctly contributes no real
+    # year, and that's valid on its own, not a parse error.
+    result = parser.parse_input("[100년 전쟁]에서 사건이 있었다.")
+    assert result.years == []
+    assert result.tags == ["100년 전쟁"]
 
 
 def test_parse_input_extracts_only_the_year_outside_brackets():

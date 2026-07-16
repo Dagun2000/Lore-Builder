@@ -2,7 +2,7 @@ character:
   id_prefix: char_
   fields:
     # required: name / optional: gender, birth_year, death_year, race,
-    # appearance, notes, lifespan_check_ack, event_ids
+    # notes, lifespan_check_ack, event_ids
     - name: name
       type: text
       required: true
@@ -22,9 +22,6 @@ character:
       type: reference
       ref_category: race
       required: false
-    - name: appearance
-      type: text
-      required: false
     - name: notes
       type: text
       required: false
@@ -38,15 +35,15 @@ character:
 race:
   id_prefix: race_
   fields:
-    # required: name / optional: lifespan, weaknesses, notes, event_ids
+    # required: name / optional: lifespan, notes, event_ids
+    # weaknesses was removed (Phase 10 patch 8) — free text describing a
+    # weakness belongs in notes like any other qualitative trait, and not
+    # every race even has one worth calling out as its own field.
     - name: name
       type: text
       required: true
     - name: lifespan
       type: integer
-      required: false
-    - name: weaknesses
-      type: list
       required: false
     - name: notes
       type: text
@@ -112,7 +109,7 @@ faction:
 artifact:
   id_prefix: item_
   fields:
-    # required: name / optional: origin_event, destroyed_year, notes,
+    # required: name / optional: created_year, destroyed_year, notes,
     # event_ids
     # current_status was removed (Phase 10 patch 7, D) — it was a static
     # snapshot field that directly contradicted the event-centric design
@@ -129,13 +126,17 @@ artifact:
     # right now is computed on read via storage.get_current_holder(item_id,
     # "owns"), the reverse of get_current_state — never stored, never
     # hand-edited, no cache to go stale.
+    # origin_event replaced with created_year (Phase 10 patch 8) — a
+    # reference to a timeline event was a different pattern from every other
+    # category's created/destroyed year pair; created_year (role:
+    # lifecycle_start) makes artifact match character/location/faction.
     - name: name
       type: text
       required: true
-    - name: origin_event
-      type: reference
-      ref_category: timeline
+    - name: created_year
+      type: integer
       required: false
+      role: lifecycle_start
     - name: destroyed_year
       type: integer
       required: false
@@ -195,7 +196,13 @@ timeline:
 system:
   id_prefix: system_
   fields:
-    # required: domain, hard_rule / optional: notes
+    # required: name, domain, hard_rule / optional: notes
+    # name added (Phase 10 patch 8) — domain/hard_rule alone gave no way for
+    # a person to identify/refer to a specific rule; every other category
+    # already had a name field.
+    - name: name
+      type: text
+      required: true
     - name: domain
       type: enum
       options: [magic, divine, artifact_law, physics]

@@ -14,7 +14,7 @@ the goal is being able to repeat every CLI test scenario through the GUI.
 
 import streamlit as st
 
-from src import deletion, field_update, flags, hard_check, pipeline_session, schema, storage
+from src import archivist, deletion, field_update, flags, hard_check, pipeline_session, schema, storage
 
 _NAME_BEARING_CATEGORIES = ("character", "location", "faction", "artifact", "race")
 
@@ -389,6 +389,21 @@ def render_sidebar_search() -> None:
             st.rerun()
 
 
+def _dictionary_label(category: str, entity: dict) -> str:
+    """Phase 10 patch 8: the id is a content-derived slug (often just the
+    name/notes with spaces swapped for underscores) — never useful for a
+    person to look at, so it's dropped everywhere except as a fallback for
+    the one category with no `name` field at all (timeline)."""
+    if category == "timeline":
+        if entity.get("year") is not None:
+            return f"[{entity['year']}년] {entity.get('notes') or entity['id']}"
+        start = entity.get("start_year")
+        span = f"{start}~{entity.get('end_year') or '현재'}" if start is not None else "?"
+        predicate = entity.get("predicate") or ""
+        return f"[{span}] {predicate} — {entity.get('notes') or entity['id']}"
+    return entity.get("name") or entity["id"]
+
+
 def render_dictionary_mode() -> None:
     """Phase 10 patch 7 (G): Streamlit drops a widget's Session State entry
     at the end of any run where that widget wasn't instantiated — and this
@@ -411,8 +426,7 @@ def render_dictionary_mode() -> None:
         return
 
     for entity in entities:
-        label = entity.get("name") or entity["id"]
-        if st.button(f"{label} ({entity['id']})", key=f"dict_{entity['id']}"):
+        if st.button(_dictionary_label(category, entity), key=f"dict_{entity['id']}"):
             _navigate_to_entity(entity["id"])
             st.rerun()
 
@@ -424,60 +438,27 @@ def render_dictionary_mode() -> None:
 _EVENT_POINTER_CATEGORIES = ("character", "location", "faction", "artifact", "race")
 
 
-def _render_current_state_section(entity_id: str) -> None:
-    """get_current_state over every status_effects.yaml id — Phase 10
-    replaces the old active_status_effects-field display with a live query
-    against this entity's duration events."""
-    active = []
-    for s in schema.load_status_effects():
-        if storage.get_current_state(entity_id, s["id"]):
-            active.append(s["label"])
-    st.subheader("현재 상태")
-    st.write(", ".join(active) if active else "활성 상태 없음")
-
-
-def _render_related_events_section(entity_id: str) -> None:
-    """Shown only once a field edit is actually attempted (Phase 10 patch 7,
-    F) — an always-visible listing regardless of intent turned out to be
-    more noise than help; "필드 값 검토" (which sets detail_searched) is the
-    signal that the user is genuinely trying to change something on this
-    entity, not just browsing. The listing itself is still full recall via
-    event_ids (storage.get_events_for_entity), not similarity search — that
-    part was already correct, just gated wrong."""
-    st.subheader("관련 이벤트")
-    related_docs = field_update.find_related_context(entity_id)
-    if not related_docs:
-        st.write("관련 이벤트가 없습니다.")
+def _render_relevant_context_section(entity_id: str, field_name: str, new_value) -> None:
+    """Phase 10 patch 8 — replaces the old "dump every event this entity
+    points at" panel (which showed a destroyed_year edit dawnblade's own
+    forging event, etc.) with field_update.find_relevant_context: a 1-hop
+    walk to *other* entities sharing an event with this one, judged for
+    relevance to *this specific edit* by a single batched LLM call. Manual
+    flagging is gone too — direct access to any event via the dictionary's
+    "timeline" category (see _render_timeline_detail) means there's no
+    longer a need for a "flag it for later" workaround (patch 8, section 4)."""
+    st.subheader("관련 기록")
+    matches = field_update.find_relevant_context(entity_id, field_name, new_value)
+    if not matches:
+        st.write("관련성이 있어 보이는 기록이 없습니다.")
         return
 
-    for doc in related_docs:
-        doc_key = f"detail_flag_{entity_id}_{doc.entity_id}"
-        col1, col2 = st.columns([1, 8])
-        checked = col1.checkbox("플래그", key=f"{doc_key}_check")
-        col2.write(f"{doc.relevance_rank}. **{doc.entity_id}** ({doc.source}: {doc.relation})")
-        col2.caption(doc.text)
-        if checked:
-            reason = col2.text_input("사유 (선택)", key=f"{doc_key}_reason")
-            st.session_state.detail_flag_selection[doc.entity_id] = reason
-        else:
-            st.session_state.detail_flag_selection.pop(doc.entity_id, None)
-
-    if st.button("선택한 이벤트 플래그 저장", key="detail_flag_submit"):
-        for flagged_id, reason in st.session_state.detail_flag_selection.items():
-            flags.add_flag(flagged_id, f"{entity_id} 상세 화면에서 발견", reason or None)
-        st.session_state.detail_flag_selection = {}
-        st.success("플래그가 저장되었습니다.")
-        st.rerun()
-
-    with st.expander(f"이벤트 삭제 ({len(related_docs)}건)"):
-        for doc in related_docs:
-            if st.button(f"{doc.entity_id} 삭제", key=f"delete_event_{doc.entity_id}"):
-                result = deletion.delete_event(doc.entity_id)
-                message = f"{result.deleted_id} 삭제 완료."
-                if result.affected_entities:
-                    message += " 영향받은 엔티티: " + ", ".join(result.affected_entities)
-                st.success(message)
-                st.rerun()
+    for match in matches:
+        st.write(f"**{match.entity_id}**")
+        st.caption(match.reason)
+        if st.button(f"{match.entity_id} 상세 보기", key=f"relctx_{entity_id}_{field_name}_{match.entity_id}"):
+            _navigate_to_entity(match.entity_id)
+            st.rerun()
 
 
 def _render_field_editor_section(category: str, entity_id: str, entity: dict) -> None:
@@ -575,6 +556,146 @@ def _render_delete_entity_section(category: str, entity_id: str) -> None:
         st.rerun()
 
 
+def _participant_options() -> list:
+    """Every entity that could plausibly appear as an event participant —
+    every name-bearing, event-pointer category. `system` deliberately isn't
+    here: it has neither event_ids nor any narrative role to play in a
+    timeline record."""
+    options = []
+    for category in _NAME_BEARING_CATEGORIES:
+        for e in storage.list_entities(category):
+            options.append(e["id"])
+    return options
+
+
+def _participant_label(entity_id: str) -> str:
+    category = schema.category_from_id(entity_id)
+    if category is None:
+        return entity_id
+    entity = storage.get_entity(category, entity_id) or {}
+    return f'{entity.get("name") or entity_id} ({category})'
+
+
+def _render_timeline_detail(entity_id: str, entity: dict) -> None:
+    """Phase 10 patch 8, section 4 — "editing" an event is internally a
+    delete-and-recreate (deletion.delete_event to unhook every current
+    participant's pointer, then the same create path archivist itself
+    uses), because a partial patch can't fix the event's own id (a
+    content-derived slug) or resync participants added/removed mid-edit.
+    Verification is hard_check only — rag_check's LLM judgments are Step
+    4's save-time contradiction checks for *new* input, redundant (and
+    potentially confusing) for a human who already reviewed this exact
+    record via the relevant-context search and chose to fix it directly.
+    No gating on how you got here — reachable from the dictionary's
+    "timeline" category or from a relevant-context match, whichever came
+    first."""
+    is_point = entity.get("year") is not None or entity.get("entity") is None
+    candidates = _participant_options()
+    labels_by_id = {eid: _participant_label(eid) for eid in candidates}
+
+    st.subheader("이벤트 수정")
+    if is_point:
+        new_year = st.number_input("연도", value=entity.get("year"), step=1, key=f"tl_year_{entity_id}")
+        loc_options = [(f'{e.get("name") or e["id"]}', e["id"]) for e in storage.list_entities("location")]
+        loc_ids = [eid for _label, eid in loc_options]
+        loc_labels = ["(없음)"] + [label for label, _eid in loc_options]
+        loc_index = loc_ids.index(entity.get("location")) + 1 if entity.get("location") in loc_ids else 0
+        loc_choice = st.selectbox("장소", loc_labels, index=loc_index, key=f"tl_loc_{entity_id}")
+        new_location = None if loc_choice == "(없음)" else loc_ids[loc_labels.index(loc_choice) - 1]
+
+        current_participants = [eid for _cat, eid in storage.find_entities_referencing_event(entity_id)]
+        selected_participants = st.multiselect(
+            "참가자", candidates, default=[p for p in current_participants if p in candidates],
+            format_func=lambda eid: labels_by_id.get(eid, eid), key=f"tl_participants_{entity_id}",
+        )
+    else:
+        new_start = st.number_input("시작 연도", value=entity.get("start_year"), step=1, key=f"tl_start_{entity_id}")
+        new_end = st.number_input("종료 연도 (비워두면 현재도 진행 중)", value=entity.get("end_year"), step=1, key=f"tl_end_{entity_id}")
+        new_predicate = st.text_input("predicate (상태/관계 이름)", value=entity.get("predicate") or "", key=f"tl_pred_{entity_id}")
+        entity_index = candidates.index(entity.get("entity")) if entity.get("entity") in candidates else 0
+        new_entity = st.selectbox(
+            "주체 (entity)", candidates, index=entity_index,
+            format_func=lambda eid: labels_by_id.get(eid, eid), key=f"tl_entity_{entity_id}",
+        ) if candidates else None
+        target_labels = ["(없음)"] + [labels_by_id[eid] for eid in candidates]
+        target_index = candidates.index(entity.get("target")) + 1 if entity.get("target") in candidates else 0
+        target_choice = st.selectbox("대상 (target, 관계형일 때만)", target_labels, index=target_index, key=f"tl_target_{entity_id}")
+        new_target = None if target_choice == "(없음)" else candidates[target_labels.index(target_choice) - 1]
+        selected_participants = [p for p in (new_entity, new_target) if p]
+
+    new_notes = st.text_area("비고", value=entity.get("notes") or "", key=f"tl_notes_{entity_id}")
+
+    review_key = f"tl_reviewed_{entity_id}"
+    pending_key = f"tl_pending_{entity_id}"
+
+    if st.button("변경사항 검토", key=f"tl_review_{entity_id}"):
+        if is_point:
+            fields = {"year": int(new_year) if new_year is not None else None, "location": new_location, "notes": new_notes}
+        else:
+            fields = {
+                "entity": new_entity, "predicate": new_predicate or None, "target": new_target,
+                "start_year": int(new_start) if new_start is not None else None,
+                "end_year": int(new_end) if new_end is not None else None,
+                "notes": new_notes,
+            }
+        st.session_state[pending_key] = {"fields": fields, "participants": selected_participants}
+        st.session_state[review_key] = True
+        st.rerun()
+
+    if not st.session_state.get(review_key):
+        return
+
+    pending = st.session_state[pending_key]
+    conflicts = []
+    extra_years = [
+        y for y in (
+            pending["fields"].get("year"),
+            pending["fields"].get("start_year"),
+            pending["fields"].get("end_year"),
+        )
+        if y is not None
+    ]
+    for participant in pending["participants"]:
+        category = schema.category_from_id(participant)
+        if category is not None:
+            conflicts.extend(hard_check.run_hard_checks(category, participant, extra_years=extra_years))
+
+    blocking = [c for c in conflicts if c.severity == "blocking"]
+    warnings = [c for c in conflicts if c.severity == "warning"]
+    if blocking:
+        st.error("하드체크 위반으로 저장할 수 없습니다:")
+        for c in blocking:
+            st.write(f"- [{c.check_type}] {c.entity_id}: {c.reason}")
+    for c in warnings:
+        st.warning(f"[{c.check_type}] {c.entity_id}: {c.reason}")
+    if not conflicts:
+        st.success("하드체크 충돌이 감지되지 않았습니다.")
+
+    if st.button("저장 (기존 이벤트 삭제 후 재생성)", key=f"tl_save_{entity_id}", disabled=bool(blocking)):
+        deletion.delete_event(entity_id)
+        new_id = archivist.generate_id("timeline", pending["fields"].get("notes") or entity_id, set())
+        storage.save_entity("timeline", new_id, pending["fields"])
+        storage.save_to_chroma(new_id, pending["fields"].get("notes") or "", {"category": "timeline"})
+        for participant in pending["participants"]:
+            storage.add_event_pointer(participant, new_id)
+
+        st.session_state.pop(review_key, None)
+        st.session_state.pop(pending_key, None)
+        st.success(f"이벤트가 갱신되었습니다: {entity_id} → {new_id}")
+        _navigate_to_entity(new_id)
+        st.rerun()
+
+    st.subheader("이벤트 삭제")
+    if st.button("이 이벤트 삭제", key=f"tl_delete_{entity_id}"):
+        result = deletion.delete_event(entity_id)
+        message = f"{result.deleted_id} 삭제 완료."
+        if result.affected_entities:
+            message += " 포인터가 제거된 엔티티: " + ", ".join(result.affected_entities)
+        st.success(message)
+        _navigate_to_entity(None)
+        st.rerun()
+
+
 def render_entity_detail(entity_id: str) -> None:
     category = schema.category_from_id(entity_id)
     if category is None:
@@ -593,27 +714,32 @@ def render_entity_detail(entity_id: str) -> None:
     st.subheader("현재 필드 값")
     st.json(entity)
 
-    if category in _EVENT_POINTER_CATEGORIES:
-        _render_current_state_section(entity_id)
+    if category == "timeline":
+        # Phase 10 patch 8, section 4: an event has no fields that can be
+        # patched one at a time without invalidating its own content-derived
+        # id, so it gets a dedicated form instead of the generic field
+        # editor — see _render_timeline_detail.
+        _render_timeline_detail(entity_id, entity)
+        return
 
     _render_field_editor_section(category, entity_id, entity)
 
-    # "관련 이벤트" only once a field edit is actually attempted this
-    # session (detail_searched, set by "필드 값 검토" below) — see
-    # _render_related_events_section's docstring. Lifecycle fields
-    # (birth_year/death_year/founded_year/...) are excluded even then: the
-    # only thing "related events" could mean there is "does this year
+    # The relevance search only runs once a field edit is actually
+    # attempted this session (detail_searched, set by "필드 값 검토" below),
+    # and never for lifecycle fields (birth_year/death_year/founded_year/
+    # ...) — the only thing "related" could mean there is "does this year
     # conflict with a recorded event", and hard_check already answers that
     # directly above (see _render_field_editor_section's success/warning
-    # messages) — a full event listing under a year field is noise, not a
-    # different signal.
+    # messages).
     selected_field_def = next(
         (f for f in schema.get_fields(category) if f["name"] == st.session_state.get("detail_field_name")),
         None,
     )
     is_lifecycle_field = bool(selected_field_def and selected_field_def.get("role") in ("lifecycle_start", "lifecycle_end"))
     if category in _EVENT_POINTER_CATEGORIES and st.session_state.get("detail_searched") and not is_lifecycle_field:
-        _render_related_events_section(entity_id)
+        _render_relevant_context_section(
+            entity_id, st.session_state.detail_field_name, st.session_state.detail_new_value
+        )
     _render_delete_entity_section(category, entity_id)
 
 

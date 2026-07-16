@@ -457,6 +457,27 @@ def _pipeline_generator(session: PipelineSession):
         # created something this run; otherwise say so plainly and point at
         # the real edit path.
         if session.newly_created_entities:
+            # Phase 10 patch 9 (A): a brand-new entity's fields/notes are a
+            # new claim about the world exactly like an event is — they must
+            # go through Step 4 before being treated as accepted, even though
+            # there's no timeline record to hang the check on. (a bare
+            # lifecycle-only creation with no notes/attributes worth checking
+            # still runs this — check_rule_violation/check_notes_conflict
+            # both no-op harmlessly when there's nothing relevant to compare.)
+            rag_judgments = rag_check.run_entity_creation_checks(
+                list(resolved_entities.values()), parsed.raw_text
+            )
+            session.rag_judgments = rag_judgments
+
+            ok = yield from _review_rag_judgments_gen(rag_judgments)
+            if not ok:
+                return {
+                    "status": "rejected",
+                    "stage": "rag_check",
+                    "resolved_entities": resolved_entities,
+                    "rag_judgments": rag_judgments,
+                }
+
             return {
                 "status": "entity_only",
                 "resolved_entities": resolved_entities,

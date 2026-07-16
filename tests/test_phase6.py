@@ -112,13 +112,13 @@ def test_update_field_flow_with_no_related_context_still_saves(monkeypatch):
     monkeypatch.setattr(field_update, "_prompt", lambda message: "y")
 
     result = field_update.update_field_flow(
-        "char_p6_e", "appearance", "키가 크고 마른 체형."
+        "char_p6_e", "notes", "키가 크고 마른 체형."
     )
 
     assert result["status"] == "saved"
     assert result["related_docs"] == []
     entity = storage.get_entity("character", "char_p6_e")
-    assert entity["appearance"] == "키가 크고 마른 체형."
+    assert entity["notes"] == "키가 크고 마른 체형."
 
 
 def test_update_field_flow_more_reveals_remaining_docs(monkeypatch, capsys):
@@ -133,7 +133,7 @@ def test_update_field_flow_more_reveals_remaining_docs(monkeypatch, capsys):
     responses = iter(["more", "", "y"])
     monkeypatch.setattr(field_update, "_prompt", lambda message: next(responses))
 
-    result = field_update.update_field_flow("char_p6_f", "appearance", "평범한 외모.")
+    result = field_update.update_field_flow("char_p6_f", "notes", "평범한 외모.")
 
     captured = capsys.readouterr()
     assert result["status"] == "saved"

@@ -13,11 +13,23 @@ Two independent tracks, both triggered by update_field_flow, never just one:
     at — Phase 10 retired the relationship table + Chroma-similarity search
     this used to run; event_ids is now the complete, exact list of what's
     related, so there's nothing left to rank by similarity for.
+
+Phase 10 patch 8 adds a third track, find_relevant_context, used by the GUI's
+field-edit screen instead of Track B: rather than dumping every event this
+entity is pointed at (noisy — a destroyed_year edit doesn't need to see the
+item's forging event), it walks one hop out to whichever *other* entities
+share an event with this one, and asks an LLM in a single batched call
+whether each candidate's own notes/fields look relevant to *this specific
+edit*. Like Track B this only surfaces candidates for a human to look at —
+it is not a save-time contradiction verdict (that's still rag_check.
+check_notes_conflict, a separate call at a separate point in the pipeline).
 """
 
+import json
+import re
 from dataclasses import dataclass
 
-from . import approval, flags, hard_check, schema, storage
+from . import approval, config, flags, hard_check, rag_check, schema, storage
 
 _NAME_BEARING_CATEGORIES = ("character", "location", "faction", "artifact", "race")
 
@@ -111,6 +123,190 @@ def find_related_context(entity_id: str) -> list:
             )
         )
     return docs
+
+
+# ---------------------------------------------------------------------------
+# Track C (Phase 10 patch 8) — 1-hop, edit-aware relevance search
+# ---------------------------------------------------------------------------
+
+_AGE_FOCUS_DESCRIPTION = (
+    "나이, 연령, 나이 제한(예: '몇 살 이상만'), 세월의 경과, 늙음/젊음 등 나이·시간과 "
+    "관련된 서술"
+)
+
+
+@dataclass
+class RelevantMatch:
+    entity_id: str  # a 1-hop entity, or (name edits only) a timeline event id
+    reason: str  # the candidate text that triggered the match
+
+
+def _get_llm():
+    from langchain_openai import ChatOpenAI
+
+    return ChatOpenAI(model=config.get_model("reasoning"), temperature=0)
+
+
+def _invoke_llm(prompt: str) -> str:
+    response = _get_llm().invoke(prompt)
+    return getattr(response, "content", str(response)).strip()
+
+
+def _extract_json(raw: str) -> dict:
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not match:
+        raise ValueError(f"응답에서 JSON을 찾을 수 없습니다: {raw!r}")
+    return json.loads(match.group(0))
+
+
+def _one_hop_entities(entity_id: str) -> set:
+    """Every other entity sharing an event with entity_id, deduplicated to
+    unique entities rather than counted per event (Phase 10 patch 8, 2-1) —
+    a character entangled with the same faction across a hundred events
+    still contributes that faction exactly once. Point events don't store
+    their own participant list, so who else is connected is only knowable
+    via the reverse lookup (storage.find_entities_referencing_event);
+    duration events already carry entity/target directly."""
+    connected = set()
+    for record in storage.get_events_for_entity(entity_id):
+        if record.get("year") is not None:  # point event
+            participants = [
+                eid for _category, eid in storage.find_entities_referencing_event(record["id"])
+            ]
+        else:  # duration event
+            participants = [record.get("entity"), record.get("target")]
+        for participant in participants:
+            if participant and participant != entity_id:
+                connected.add(participant)
+    return connected
+
+
+def _is_age_field(category: str, field_name: str) -> bool:
+    """Only character birth_year/death_year carry an "age" meaning — a
+    faction's founded_year or an artifact's created_year don't feed any
+    lifespan-style hard check, so they're treated as ordinary structured
+    fields instead (Phase 10 patch 8, 2-2)."""
+    if category != "character":
+        return False
+    field_def = next((f for f in schema.get_fields(category) if f["name"] == field_name), None)
+    return bool(field_def and field_def.get("role") in ("lifecycle_start", "lifecycle_end"))
+
+
+def _notes_diff(old_text, new_text) -> str:
+    """The newly added/changed portion of a notes edit, not the whole
+    field (Phase 10 patch 8, 2-3) — the common case (appending a sentence)
+    is handled exactly; a full rewrite falls back to the whole new text
+    since there's no clean "added part" to isolate."""
+    old_text = old_text or ""
+    new_text = new_text or ""
+    if old_text and old_text in new_text:
+        remainder = new_text.replace(old_text, "", 1).strip()
+        return remainder or new_text
+    return new_text
+
+
+def _candidate_text(entity_id: str, include_fields: bool) -> str:
+    category = schema.category_from_id(entity_id)
+    if category is None:
+        return ""
+    record = storage.get_entity(category, entity_id) or {}
+    parts = []
+    if include_fields:
+        summary = rag_check.entity_field_summary(record)
+        if summary:
+            parts.append(summary)
+    if record.get("notes"):
+        parts.append(record["notes"])
+    return " / ".join(parts)
+
+
+def _judge_relevance(candidates: list, focus: str) -> set:
+    """One batched LLM call comparing every candidate against `focus` at
+    once (Phase 10 patch 8, 2-4) — never per-candidate, never a vector/
+    embedding search, never a hardcoded synonym table. The same style of
+    direct LLM comparison rag_check.check_notes_conflict already uses
+    (which is why synonyms/rephrasings like "여성/여자/계집" work without
+    ever being enumerated anywhere). Purely a "worth a human look" filter —
+    not a save-time contradiction verdict."""
+    candidates = [(eid, text) for eid, text in candidates if text]
+    if not candidates:
+        return set()
+
+    block = "\n".join(f"- {eid}: {text}" for eid, text in candidates)
+    prompt = (
+        "너는 판타지 세계관 로어 데이터베이스의 보조 검색기다. 아래 후보 목록 중, 다음 "
+        f"기준과 관련이 있어 보이는 항목을 전부 골라라.\n\n기준: {focus}\n\n"
+        f"후보 목록:\n{block}\n\n"
+        "동의어나 표현이 달라도(예: '여성'과 '여자') 의미가 통하면 관련 있다고 판단하라. "
+        "확신이 없어도 조금이라도 관련 가능성이 있으면 포함시켜라 — 이건 최종 판단이 아니라 "
+        "사람이 검토할 후보를 추리는 것뿐이다.\n\n"
+        '아래 JSON 형식으로만 답하라: {"relevant_entity_ids": ["entity_id", ...]}\n'
+    )
+    print(f"[field_update] 관련성 판단 후보 {len(candidates)}건, 기준: {focus}")
+    try:
+        data = _extract_json(_invoke_llm(prompt))
+    except Exception as exc:
+        print(f"[field_update] 관련성 판단 실패, 빈 결과로 처리: {exc}")
+        return set()
+    relevant_ids = set(data.get("relevant_entity_ids") or [])
+    print(f"[field_update] 관련성 판단 결과: {sorted(relevant_ids) or '(없음)'}")
+    return relevant_ids
+
+
+def find_relevant_context(entity_id: str, field_name: str, new_value) -> list:
+    """Edit-aware related-context search (Phase 10 patch 8) — what's shown
+    to the GUI's field-edit screen instead of the old full event listing.
+    Search scope is asymmetric depending on what's being edited:
+      - name: not a relevance judgment at all — the old name is searched
+        verbatim against this entity's own past event notes, since a
+        rename is a "find the frozen-in-prose old string" problem, not a
+        "does this fact still hold" problem.
+      - notes: only the newly added/changed portion is searched, against
+        every 1-hop entity's fields *and* notes (prose can contradict any
+        settled fact).
+      - an age field (character birth/death year): the existing hard check
+        is untouched; this *additionally* searches 1-hop notes for an
+        age/time-related mention, since "must be over 100 years old" is a
+        prose constraint no deterministic check can catch.
+      - anything else structured (gender, category, domain, ...): 1-hop
+        notes only, searched with both the old and new value — a rule
+        like "남성만 있는 형제단" would otherwise be missed when flipping
+        gender away from the value the rule was written against.
+    """
+    category = schema.category_from_id(entity_id)
+    if category is None:
+        return []
+
+    current = storage.get_entity(category, entity_id) or {}
+    previous_value = current.get(field_name)
+
+    if field_name == "name":
+        matches = []
+        for record in storage.get_events_for_entity(entity_id):
+            notes = record.get("notes") or ""
+            if previous_value and previous_value in notes:
+                matches.append(RelevantMatch(entity_id=record["id"], reason=notes))
+        return matches
+
+    one_hop = _one_hop_entities(entity_id)
+
+    if field_name == "notes":
+        diff = _notes_diff(previous_value, new_value)
+        focus = f'"{diff}"라는 서술과 관련되거나 모순될 수 있는 내용'
+        candidates = [(eid, _candidate_text(eid, include_fields=True)) for eid in one_hop]
+    elif _is_age_field(category, field_name):
+        focus = _AGE_FOCUS_DESCRIPTION
+        candidates = [(eid, _candidate_text(eid, include_fields=False)) for eid in one_hop]
+    else:
+        focus = f'"{previous_value}" 또는 "{new_value}"와(과) 관련되거나 전제로 하는 규칙/서술'
+        candidates = [(eid, _candidate_text(eid, include_fields=False)) for eid in one_hop]
+
+    relevant_ids = _judge_relevance(candidates, focus)
+    return [
+        RelevantMatch(entity_id=eid, reason=text)
+        for eid, text in candidates
+        if eid in relevant_ids
+    ]
 
 
 # ---------------------------------------------------------------------------

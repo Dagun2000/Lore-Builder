@@ -115,7 +115,7 @@ def check_rule_violation(raw_text: str, context_docs: list) -> Judgment | None:
 _FIELD_SUMMARY_EXCLUDED = {"id", "name", "notes", "event_ids", "lifespan_check_ack"}
 
 
-def _entity_field_summary(record: dict) -> str | None:
+def entity_field_summary(record: dict) -> str | None:
     """A flat "field=value" summary of an entity's own stored fields (Phase
     10 patch 5) — gender, race, etc. `notes` and internal bookkeeping fields
     (event_ids, lifespan_check_ack) are excluded; notes gets its own line
@@ -146,7 +146,7 @@ def check_notes_conflict(entities: list, raw_text: str) -> Judgment | None:
         # sentence didn't restate it, which is exactly why "성별을 이미 저장된
         # 기존 캐릭터가 여성전용 세력에 가입" kept slipping through undetected
         # across multiple rounds of testing.
-        summary = _entity_field_summary(record)
+        summary = entity_field_summary(record)
         if summary:
             notes_lines.append(f"{entity_id}의 저장된 정보: {summary}")
         if record.get("notes"):
@@ -177,6 +177,26 @@ def check_notes_conflict(entities: list, raw_text: str) -> Judgment | None:
     prompt = (
         "너는 판타지 세계관의 설정 감사관이다. 아래는 관련 엔티티들의 기존 설정(notes)이다. "
         "새로 입력된 사건 문장이 이 설정과 모순되는지 판단하라.\n\n"
+        "명시적 규칙 위반뿐 아니라, 서술된 성격·위험도와 행동 톤 사이의 모순도 확인하라:\n"
+        "1. 관련 엔티티(장소, 사물, 인물 등)의 notes에 그 대상의 성격·용도·제약을 규정하는 "
+        "서술이 있는지 확인하라. 규정하는 서술의 예: 위험도(\"목숨이 위험하다\", \"결투를 "
+        "하는 곳이다\"), 접근 제약(\"출입 금지\", \"선택받은 자만\"), 효과 강도(\"일상생활이 "
+        "불가능하다\") 등.\n"
+        "2. 이런 서술이 있으면, 새로 입력된 행동이 그 서술의 통상적 함의와 정면으로 "
+        "반대되는지 판단하라.\n"
+        "   - 위험/제약이 명시된 대상에서 안전하고 여유로운 행동(피크닉, 산책, 낮잠 등)을 "
+        "하면 -> 모순 후보\n"
+        "   - 반대로 안전하다고 명시된 대상에서 위험하거나 폭력적인 사건(살해, 습격 등)이 "
+        "발생하면 -> 모순 후보\n"
+        "3. 단, 다음의 경우 모순으로 보지 않는다:\n"
+        "   - 행동이 발생한 위치나 맥락이 그 규정이 적용되는 범위 밖임이 문장에 명시된 경우 "
+        "(예: \"결투를 하는 투기장\"이라는 서술이 있어도, 행동이 \"관중석\"처럼 위험 구역과 "
+        "구분되는 별도 장소에서 일어났다면 자연스러운 상황일 수 있다)\n"
+        "   - 행동 자체가 이미 그 위험/제약을 인지하고 대응하는 것으로 보이는 경우(예: 전투, "
+        "경계, 도주 등은 위험한 곳에서 나와도 모순이 아니다)\n"
+        "4. 판단이 애매하면 반대편 확신 없이도 모순 가능성이 있다고 보고하라 — 최종 판단은 "
+        "사람이 확인 후 결정하므로, 놓치는 것보다 애매하게라도 짚어주는 쪽이 낫다. 확신이 "
+        "없다는 걸 reason에 명시해도 된다.\n\n"
         f"기존 설정:\n{notes_block}\n\n"
         f"사건 문장: {raw_text}\n\n"
         "모순 가능성이 있으면:\n"
@@ -257,6 +277,28 @@ def check_status_consistency(entity_id: str, raw_text: str, event_year: int) -> 
 # ---------------------------------------------------------------------------
 # 2-5. Integration
 # ---------------------------------------------------------------------------
+
+def run_entity_creation_checks(entities: list, raw_text: str) -> list:
+    """Step 4 for a brand-new entity's directly-saved fields/notes (Phase 10
+    patch 9) — a bare attribute statement like "[아마조네스 용병단]은 여성만이
+    가입 가능한 용병단이다" never becomes a timeline event (no year), so it
+    used to skip Step 4 entirely and reach storage unchecked. Same world-rule
+    + notes-conflict judgments as run_rag_checks, minus
+    check_status_consistency — that check is anchored to a specific
+    event_year, which a year-less attribute creation doesn't have."""
+    judgments = []
+
+    hard_rule_docs = _get_hard_rule_texts()
+    rule_judgment = check_rule_violation(raw_text, hard_rule_docs)
+    if rule_judgment is not None:
+        judgments.append(rule_judgment)
+
+    notes_judgment = check_notes_conflict(entities, raw_text)
+    if notes_judgment is not None:
+        judgments.append(notes_judgment)
+
+    return judgments
+
 
 def run_rag_checks(entities: list, raw_text: str, event_year: int) -> list:
     print(f"[rag_check] run_rag_checks 호출: entities={entities}, year={event_year}")

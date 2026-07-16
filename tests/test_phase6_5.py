@@ -47,10 +47,10 @@ def test_update_field_flow_flagging_is_independent_of_field_save(monkeypatch):
     responses = iter(["1", "다시 확인 필요", "y"])
     monkeypatch.setattr(field_update, "_prompt", lambda message: next(responses))
 
-    result = field_update.update_field_flow("char_p65_d", "appearance", "새로운 외모.")
+    result = field_update.update_field_flow("char_p65_d", "notes", "새로운 외모.")
 
     assert result["status"] == "saved"
-    assert storage.get_entity("character", "char_p65_d")["appearance"] == "새로운 외모."
+    assert storage.get_entity("character", "char_p65_d")["notes"] == "새로운 외모."
 
     assert len(result["flagged"]) == 1
     flagged_entry = result["flagged"][0]
@@ -71,8 +71,8 @@ def test_update_field_flow_skipping_flag_prompt_still_saves_normally(monkeypatch
     responses = iter(["", "y"])
     monkeypatch.setattr(field_update, "_prompt", lambda message: next(responses))
 
-    result = field_update.update_field_flow("char_p65_e", "appearance", "평범한 외모.")
+    result = field_update.update_field_flow("char_p65_e", "notes", "평범한 외모.")
 
     assert result["status"] == "saved"
-    assert storage.get_entity("character", "char_p65_e")["appearance"] == "평범한 외모."
+    assert storage.get_entity("character", "char_p65_e")["notes"] == "평범한 외모."
     assert result["flagged"] == []

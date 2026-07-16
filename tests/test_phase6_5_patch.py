@@ -34,7 +34,7 @@ def test_update_field_flow_auto_clears_flags_on_the_edited_entity(monkeypatch):
 
     monkeypatch.setattr(field_update, "_prompt", lambda message: "y")
 
-    result = field_update.update_field_flow("char_p65p_c", "appearance", "새로운 외모.")
+    result = field_update.update_field_flow("char_p65p_c", "notes", "새로운 외모.")
 
     assert result["status"] == "saved"
     assert result["cleared_flags"] == 2

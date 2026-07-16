@@ -10,7 +10,7 @@ itself is untouched and still used directly by test_e2e.py.
 
 Section 2 exercises pipeline_session.start_session/resume_session directly
 for the specific state-machine behaviors Phase 8 introduces (pausing,
-resuming, one-decision-at-a-time diff review, immediate abort on a blocking
+resuming, the bundled diff_review decision, immediate abort on a blocking
 conflict).
 """
 
@@ -42,7 +42,7 @@ def _script(*pairs, max_calls=15):
 
 def test_new_character_death_event_saves_normally(monkeypatch):
     monkeypatch.setattr(
-        main, "_prompt", _script(("기본값", ""), ("사망", "예"), ("승인하시겠습니까", "y"))
+        main, "_prompt", _script(("기본값", ""), ("사망", "예"), ("저장하시겠습니까", "저장"))
     )
 
     result = main.run_pipeline_interactive("2200년, [로한]이 몬스터와 싸우다가 죽었다.")
@@ -112,7 +112,7 @@ def test_lifespan_warning_accept_sets_ack_and_suppresses_future_popup(monkeypatc
         },
     )
     monkeypatch.setattr(
-        main, "_prompt", _script(("그래도 저장", "그래도 저장"), ("승인하시겠습니까", "y"))
+        main, "_prompt", _script(("그래도 저장", "그래도 저장"), ("저장하시겠습니까", "저장"))
     )
 
     result1 = main.run_pipeline_interactive("2100년, [세라핀]이 시장에 나타났다.")
@@ -138,7 +138,7 @@ def test_lifespan_warning_computed_from_event_years_only(monkeypatch):
     storage.save_entity("timeline", "event_p8_nodates_a", {"year": 2000})
     storage.add_event_pointer("char_p8_nodates", "event_p8_nodates_a")
     monkeypatch.setattr(
-        main, "_prompt", _script(("그래도 저장", "그래도 저장"), ("승인하시겠습니까", "y"))
+        main, "_prompt", _script(("그래도 저장", "그래도 저장"), ("저장하시겠습니까", "저장"))
     )
 
     result = main.run_pipeline_interactive("2100년, [유리안]이 시장에 나타났다.")
@@ -189,7 +189,7 @@ def test_escape_clears_imprisoned_status_automatically(monkeypatch):
     storage.add_event_pointer("char_p8_prisoner", "event_p8_prisoner_status")
 
     monkeypatch.setattr(
-        main, "_prompt", _script(("그래도 저장하시겠습니까", "그래도 저장"), ("승인하시겠습니까", "y"))
+        main, "_prompt", _script(("그래도 저장하시겠습니까", "그래도 저장"), ("저장하시겠습니까", "저장"))
     )
 
     result = main.run_pipeline_interactive("2100년, [브락스]가 탈출해서 마을로 도망쳤다.")
@@ -218,7 +218,7 @@ def test_imprisoned_character_fighting_raises_conflict_popup(monkeypatch):
     )
     storage.add_event_pointer("char_p8_prisoner2", "event_p8_prisoner2_status")
 
-    responder = _script(("그래도 저장", "그래도 저장"), ("승인하시겠습니까", "y"))
+    responder = _script(("그래도 저장", "그래도 저장"), ("저장하시겠습니까", "저장"))
     monkeypatch.setattr(main, "_prompt", responder)
 
     result = main.run_pipeline_interactive("2100년, [카인]이 수감 중에 전장에서 검을 휘둘렀다.")
@@ -264,14 +264,21 @@ def test_new_entity_pauses_for_category_and_name_before_anything_else():
     assert session.pending_decision.payload["has_name_field"] is True
 
 
-def test_category_and_name_edit_advances_to_terminal_status_for_character():
+def test_confident_death_language_skips_terminal_status_fallback_during_edit():
+    # entity_terminal_status here is a fallback for language the attribute
+    # extractor (Phase 10 patch 2/3) isn't confident enough to act on
+    # directly — confident death language like "죽었다" gets death_year
+    # filled straight from context, so the fallback (and its popup) never
+    # fires; "edit" goes straight to whatever fields are still genuinely
+    # unset.
     session = pipeline_session.start_session("2100년, [파블로]가 몬스터와 싸우다가 죽었다.")
     session = pipeline_session.resume_session(
         session.session_id, {"category": None, "name": "파블로", "action": "edit"}
     )
 
-    assert session.pending_decision.decision_type == "entity_terminal_status"
-    assert session.pending_decision.payload["tag"] == "파블로"
+    assert session.pending_decision.decision_type == "entity_required_field"
+    field_names = {f["name"] for f in session.pending_decision.payload["fields"]}
+    assert "death_year" not in field_names  # already filled by the extractor
 
 
 def test_category_override_changes_the_field_set_offered_next():
@@ -291,8 +298,15 @@ def test_category_override_changes_the_field_set_offered_next():
     assert "birth_year" not in field_names  # character-only field must be gone
 
 
-def test_save_and_continue_leaves_remaining_fields_blank():
-    # Patch A completion criterion 3.
+def test_save_and_continue_forces_required_but_skips_optional_fields():
+    # Patch A completion criterion 3 (revised): "save" only ever skips
+    # *optional* fields — a still-missing *required* field (faction.category
+    # here) is force-prompted regardless, per _create_new_entity_gen's own
+    # documented design (Phase 10 patch 2, C: "required fields can never be
+    # skipped"). This used to assert no entity_required_field prompt at all,
+    # which only held back when name was faction's only required field;
+    # category is required too and isn't inferable from this input's vague
+    # "세력" wording.
     session = pipeline_session.start_session("2100년, [그림자단]이라는 새로운 세력이 등장했다.")
     assert session.pending_decision.decision_type == "entity_category_and_name"
     assert session.pending_decision.payload["inferred_category"] == "faction"
@@ -301,21 +315,43 @@ def test_save_and_continue_leaves_remaining_fields_blank():
         session.session_id, {"category": None, "name": "그림자단", "action": "save"}
     )
 
+    required_field_prompts = 0
     while session.pending_decision is not None:
         dt = session.pending_decision.decision_type
-        assert dt != "entity_required_field"  # fast path must never ask for more
-        response = "그래도 저장" if dt in ("hard_check_warning", "rag_judgment") else True
+        if dt == "entity_required_field":
+            required_field_prompts += 1
+            field_names = {f["name"] for f in session.pending_decision.payload["fields"]}
+            assert field_names == {"category"}  # the one still-missing required field
+            response = {"category": "tribe"}
+        elif dt in ("hard_check_warning", "rag_judgment"):
+            response = "그래도 저장"
+        else:
+            response = True
         session = pipeline_session.resume_session(session.session_id, response)
 
-    assert session.stage == "done"
+    assert required_field_prompts == 1
+    # The input's only year (2100) is a bare lifecycle attribute (patch 2/3)
+    # consumed as founded_year, not a narrative year — nothing is left to
+    # anchor a timeline record to, so this resolves as "entity_only", not a
+    # diff-approved "saved" (pipeline_session._advance maps every non-"saved"
+    # outcome to stage "aborted", regardless of whether it's a genuine error
+    # or, as here, a normal no-event completion).
+    assert session.result["status"] == "entity_only"
     entity_id = session.result["resolved_entities"]["그림자단"]
     entity = storage.get_entity("faction", entity_id)
     assert entity["name"] == "그림자단"
-    assert entity.get("category") is None
+    assert entity["category"] == "tribe"
+    assert entity.get("disbanded_year") is None  # optional, correctly left blank
 
 
 def test_edit_reveals_full_field_form_for_non_character():
-    # Patch A completion criterion 4 (required forced, optional included).
+    # Patch A completion criterion 4 (required forced, optional included) —
+    # "included" means every field the attribute extractor didn't already
+    # fill, not literally every schema field: this input's bare year (no
+    # narrative around it — patch 2/3) gets consumed directly as
+    # founded_year, so founded_year is correctly absent here (already set),
+    # while disbanded_year/notes (never implied by this input) are still
+    # offered alongside the forced-required category.
     session = pipeline_session.start_session("2100년, [블랙로터스]라는 새로운 세력이 등장했다.")
     assert session.pending_decision.decision_type == "entity_category_and_name"
 
@@ -327,8 +363,9 @@ def test_edit_reveals_full_field_form_for_non_character():
     assert session.pending_decision.payload["category"] == "faction"
     fields_by_name = {f["name"]: f for f in session.pending_decision.payload["fields"]}
     assert fields_by_name["category"]["required"] is True
-    assert "founded_year" in fields_by_name  # optional, still offered in "edit"
-    assert fields_by_name["founded_year"]["required"] is False
+    assert "founded_year" not in fields_by_name  # already filled from the bare year
+    assert "disbanded_year" in fields_by_name  # optional, still offered in "edit"
+    assert fields_by_name["disbanded_year"]["required"] is False
 
 
 def test_cancel_entity_creation_aborts_whole_input():
@@ -379,13 +416,20 @@ def test_hard_check_warning_accept_persists_lifespan_ack():
     assert storage.get_entity("character", "char_p8_ack")["lifespan_check_ack"]
 
 
-def test_diff_items_are_resumed_one_at_a_time():
+def test_diff_review_is_one_bundled_decision_not_one_per_item():
+    # A later redesign (Phase 10's diff-bundling patch) replaced the
+    # per-ChangeItem "diff_item" loop this test used to exercise with a
+    # single bundled "diff_review" decision — the primary timeline record
+    # plus whichever other entities get an event_ids/pointer update
+    # alongside it, approved or rejected as one unit. "diff_item" no longer
+    # exists as a decision_type at all.
     session = pipeline_session.start_session("2100년, [로라]와 [단테]가 동맹을 맺었다.")
 
     # Drive past whatever entity/hard-check/rag decisions come up on the way
-    # to the diff review stage — this scenario's point is the diff loop, not
-    # entity resolution, so accept every intermediate decision plainly.
-    while session.pending_decision is not None and session.pending_decision.decision_type != "diff_item":
+    # to the diff review stage — this scenario's point is the diff-bundling
+    # behavior, not entity resolution, so accept every intermediate decision
+    # plainly.
+    while session.pending_decision is not None and session.pending_decision.decision_type != "diff_review":
         dt = session.pending_decision.decision_type
         if dt == "entity_candidates":
             response = session.pending_decision.payload["candidates"][0]
@@ -404,21 +448,20 @@ def test_diff_items_are_resumed_one_at_a_time():
         session = pipeline_session.resume_session(session.session_id, response)
 
     assert session.pending_decision is not None
-    assert session.pending_decision.decision_type == "diff_item"
+    assert session.pending_decision.decision_type == "diff_review"
+    payload = session.pending_decision.payload
+    assert payload["category"] == "timeline"
+    assert payload["action"] == "create"
+    resolved = session.resolved_entities
+    assert set(payload["affected_entities"]) == {resolved["로라"], resolved["단테"]}
     total = len(session.diff)
-    assert total >= 2  # timeline record + at least one relationship
+    assert total >= 2  # timeline record + at least one entity pointer update
 
-    seen = 0
-    while session.pending_decision is not None:
-        assert session.pending_decision.decision_type == "diff_item"
-        assert session.stage == "reviewing_diff"
-        seen += 1
-        session = pipeline_session.resume_session(session.session_id, True)
-        if seen < total:
-            assert session.pending_decision is not None  # not finished after just one
+    session = pipeline_session.resume_session(session.session_id, True)
 
-    assert seen == total
     assert session.stage == "done"
+    assert session.result["status"] == "saved"
+    assert len(session.result["applied"]) == total
 
 
 def test_completed_saved_session_result_matches_run_pipeline_shape():
