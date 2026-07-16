@@ -2,32 +2,43 @@
 
 # Lore Builder
 
-*A consistency-checking pipeline for fantasy worldbuilding.*
+*Keep a fictional world's lore consistent, one sentence at a time.*
 
-Lore Builder takes a single line describing something that just happened in your world — *"In 2100, [Jang] got into a brawl at [the Inn]"* — and checks it against everything already recorded before it's allowed into the database. Hard contradictions (a dead character reappearing, a destroyed item resurfacing) are rejected outright. Anything murkier — a possible world-rule violation, a clash with a character's established traits, even a numeric claim that doesn't add up against a stated correlation ("more circles = stronger" but this mage only has the minimum) — is surfaced for a human to decide, never applied automatically.
+Lore Builder is a consistency-checking assistant for building out a fictional world's history and cast of characters. Describe an event, a fact, or a relationship in plain language — tag the entities involved in `[brackets]` — and the pipeline checks it against everything already on record before it's saved:
 
-It keeps two kinds of knowledge in sync: structured facts in SQLite (entities and the timeline of events, ongoing relationships, and reversible statuses connecting them) and free-form descriptions in a Chroma vector store, so related lore can be found by meaning rather than by exact ID.
+```
+[Jang] got into a brawl at [the Inn] in 2100.
+```
 
-Every point-in-time occurrence and every ongoing relationship or personal status is a single `timeline` record, referenced from each entity it involves. An entity never stores a "current state" snapshot (no `current_owner`, no `current_status`); anything like that is computed on read from the timeline instead, since the world has no fixed notion of "now" — years can be entered in any order, spanning any range.
+Outright contradictions (a dead character reappearing, a destroyed item resurfacing, a location's own notes disagreeing with what's being described) are rejected automatically. Anything murkier — a possible world-rule violation, a clash with a character's established traits, a number that doesn't add up against a stated correlation — is surfaced with a plain-language reason and left for you to decide. Nothing is ever saved or rejected silently.
+
+Entities and their history live side by side: structured facts in SQLite (who exists, what happened, when, and how it's all connected) and free-form descriptions in a vector store, so related lore can be found by meaning, not just by exact name.
+
+## Why
+
+A world's lore gets hard to hold in your head once there's enough of it — an exiled character wandering back into the capital, a sword forged after its wielder died, a rule about who can join a guild that a new member quietly breaks. Lore Builder doesn't write your story for you; it remembers everything you've already established and flags anything new that doesn't fit, before it quietly becomes a plot hole three chapters later.
 
 ## Features
 
-- **Natural-language event ingestion** — describe what happened in plain text with `[bracketed]` entity tags; the pipeline resolves each tag to an existing entity or walks you through creating a new one (category confirmation, required fields, optional attributes all auto-filled from context where possible).
-- **Event-centric timeline** — a single `timeline` category holds both point-in-time occurrences (a fight, a founding) and ongoing duration records (a relationship, a reversible personal status like *imprisoned* or *cursed*), each one just an entity/predicate/target/start/end tuple. A cohesive multi-fact sentence can produce several linked records in one pass; a genuinely unrelated multi-event input is flagged for the user to split up instead of guessing.
-- **Deterministic hard checks** — lifecycle consistency (no reappearing after your death year, no reappearing after being destroyed/disbanded) and race-lifespan cross-checks, with zero LLM involvement.
-- **LLM-assisted inference** — turns a sentence into structured timeline records and, where the input introduces a new entity, splits out lifecycle attributes (birth/founding/creation year), persistent traits (notes), and any leftover time-bound event, anchored strictly to entities that already exist or are being created right here.
-- **RAG cross-checks, on every new claim** — flags likely world-rule violations and contradictions with an entity's established notes or stored fields, reasoning about explicit constraints (access restrictions, ability requirements), danger/tone mismatches (a "life-threatening" location and a carefree picnic), and correlation self-contradictions (a rule says "more = stronger," but a character's own count is deep in the low end despite claiming to be exceptional — while still honoring any exception clause the rule itself states, like "usually hard to progress past 2"). This runs for dated events *and* for a bare new-entity introduction with no event at all — a brand-new entity's claims are checked before being trusted, exactly like an event would be. Every judgment carries a human-readable reason and a confirm/override prompt; nothing is ever silently rejected or silently accepted.
-- **Review-before-write** — a change is assembled into one diff (the primary record plus whichever other entities get a pointer update alongside it) and shown as a single approve/reject decision, not one prompt per touched row.
-- **Web GUI (Streamlit)** — a chat mode for the same natural-language pipeline, and a dictionary mode to browse every entity by category, open a detail view (current fields, a field editor with hard-check review and a 1-hop relevance search over connected entities), edit a timeline record directly, or delete an entity/event with its pointers cleaned up automatically.
-- **CLI alternative** — `src/main.py` for the same chat pipeline, and `src/detail_panel.py` for existing-entity field edits, if you'd rather not run the GUI.
-- **Flag for later** — mark a record surfaced during a review as needing a closer look, without blocking or auto-fixing anything; the flag clears automatically once that entity itself gets fixed.
+- **Natural-language entry** — describe events and facts in plain text, tagging entities with `[brackets]`. An unrecognized tag walks you through creating a new entity: category, required fields, and as many optional details as can be inferred from context.
+- **A timeline, not a wiki page** — every event, relationship, and reversible status (imprisoned, cursed, exiled, ...) is one entry in a shared timeline, linked to everyone it involves. Nothing stores a "current state" snapshot — status is always computed from the timeline itself, since the world has no fixed sense of "now": history can be added in any year, in any order.
+- **Deterministic checks** — lifecycle consistency (no reappearing after a death or destruction date) and race/lifespan cross-checks, resolved with plain logic, no model call needed.
+- **LLM-assisted understanding** — turns a sentence into structured facts (who did what, to whom, when), and, for a new entity, separates out lifecycle attributes, persistent traits, and any event still worth recording in its own right.
+- **Contradiction checks on everything new** — flags likely rule violations and clashes with an entity's own established notes: explicit constraints, tone mismatches (a "life-threatening" ruin and a carefree picnic), even a number that doesn't hold up against a stated correlation ("more means stronger," but this one barely qualifies) — while still honoring any exception the rule itself allows for. This runs for a dated event and for a bare new-entity introduction alike, always with a reason and a chance to override.
+- **One decision per change** — a change is bundled into a single diff (the core fact plus whatever else needs updating alongside it) and shown as one approve/reject choice, not one prompt per row touched.
+- **Registries you control** — the set of reversible statuses and relationship types (imprisoned, exiled, allied-with, ...) is a plain editable list, not hardcoded; a genuinely new one Step 3 needs gets proposed to you for approval before it's added.
+- **Web GUI** — chat for the same natural-language flow, plus a browsable dictionary: open any entity for its full detail (fields, history, a focused relevance search over what's connected to it), edit a timeline entry in place, or delete something with its references cleaned up automatically.
+- **Command line, if you'd rather** — the same chat flow, plus a dedicated tool for editing existing entities directly.
+- **Flag it for later** — mark something surfaced during a review as worth a second look, without blocking or changing anything; the flag clears itself once that entity's actually fixed.
 
-## Requirements
+## Getting Started
+
+### Requirements
 
 - Python 3.12+
-- An OpenAI API key (only needed for the inference/cross-check layers — schema, storage, and the deterministic hard checks run with no key at all)
+- An OpenAI API key (only needed for the inference/cross-check layers — schema, storage, and the deterministic checks run with no key at all)
 
-## Installation
+### Install
 
 ```bash
 python -m venv .venv
@@ -35,12 +46,18 @@ source .venv/Scripts/activate    # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Configuration
+### Configure
 
 Create a `.env` file in the project root:
 
 ```
 OPENAI_API_KEY=sk-...
+```
+
+### Seed a sample world
+
+```bash
+python scripts/seed_db.py
 ```
 
 ## Usage
@@ -51,9 +68,9 @@ OPENAI_API_KEY=sk-...
 streamlit run app.py
 ```
 
-The sidebar has a live search box (works no matter which mode is active) and two working modes: **채팅 / Chat** — the same natural-language event pipeline as the CLI, rendered as widgets instead of prompts — and **딕셔너리 / Dictionary** — browse every category, open any entity for its detail view (current fields, a field editor, related-context search with per-item flag checkboxes, delete), or open a timeline record to edit it in place or remove it. A third tab (visualization) is a placeholder for now.
+The sidebar has a live search box (works no matter which tab is active) and two working modes: **Chat** — the same natural-language pipeline as the CLI, rendered as widgets instead of prompts — and **Dictionary** — browse every category, open any entity for its detail view, edit a timeline entry in place, or delete something. A third tab (visualization) is a placeholder for now.
 
-### CLI: record a new event
+### Command line
 
 ```bash
 python src/main.py
@@ -71,34 +88,22 @@ CREATE timeline: event_2100년_미라가_은빛도시에서_산책했다
 저장 완료: event_2100년_미라가_은빛도시에서_산책했다, char_mira(갱신), loc_silver_city(갱신)
 ```
 
-A new entity tag instead pauses for a category confirmation, then any required fields, before reaching the same review step. Type `종료` to exit.
+A new entity tag pauses for a category confirmation and any required fields before reaching the same review step. Type `종료` to exit.
 
-### CLI: edit an existing entity
-
-```bash
-python src/detail_panel.py
-```
-
-Look up an entity by name or ID, pick a field, and enter a new value — every event this entity is pointed at is listed before anything saves (the GUI's field editor instead narrows this down to a relevance-judged 1-hop search). Type `목록` at any prompt to see everything flagged for later review.
-
-### Seed the sample world
-
-```bash
-python scripts/seed_db.py
-```
+For editing an entity that already exists, `python src/detail_panel.py` looks it up by name or ID, lets you pick a field and enter a new value, and lists every event it's connected to before saving.
 
 ## Project Structure
 
 ```
 schema_registry.yaml       # entity categories, fields, and types — the single source of truth
-status_effects.yaml        # the fixed set of reversible statuses (imprisoned, cursed, lost, ...)
+status_effects.yaml        # reversible statuses and relationship types (imprisoned, exiled, ...)
 db/                         # seed data (Markdown with YAML frontmatter) + generated SQLite/Chroma stores
 scripts/seed_db.py          # loads db/*.md into SQLite + Chroma
 app.py                      # Streamlit GUI entry point
 
 src/
   config.py                  # model-tier -> concrete model name mapping
-  schema.py                   # schema_registry.yaml loader + lookup helpers
+  schema.py                   # schema_registry.yaml / status_effects.yaml loader + lookup helpers
   storage.py                   # SQLite + Chroma storage layer
   hard_check.py                 # deterministic lifecycle/lifespan checks
   parser.py                      # regex-based input parsing
@@ -106,13 +111,12 @@ src/
   inference.py                     # LLM event/attribute inference
   rag_check.py                      # LLM-assisted world-rule / notes / status cross-checks
   archivist.py                       # turns inference + checks into a reviewable diff
-  approval.py                         # legacy blocking review loop (still used by main.run_pipeline)
-  pipeline_session.py                  # generator-based pipeline state machine (pause/resume, shared by the GUI and the CLI's chat loop)
-  deletion.py                           # entity/event deletion with pointer cleanup
-  main.py                                # CLI entry point (chat loop + event pipeline)
-  field_update.py                         # existing-entity field update logic (hard-check re-run + 1-hop relevance search)
-  detail_panel.py                          # CLI entity-editing entry point
-  flags.py                                  # "review later" bookkeeping
+  pipeline_session.py                 # pipeline state machine (pause/resume, shared by GUI and CLI)
+  deletion.py                          # entity/event deletion with pointer cleanup
+  main.py                               # CLI entry point
+  field_update.py                       # existing-entity field update logic
+  detail_panel.py                        # CLI entity-editing entry point
+  flags.py                                # "review later" bookkeeping
 
 tests/                         # pytest suite (many tests call the OpenAI API)
 ```
