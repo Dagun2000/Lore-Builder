@@ -1,13 +1,15 @@
 status_effects:
-  - id: sealed
-    label: 봉인
-  - id: imprisoned
-    label: 수감
-  - id: missing
-    label: 실종
-  - id: cursed
-    label: 저주받음
-  - id: incapacitated
-    label: 부상/중태
-  - id: lost
-    label: 분실
+- id: sealed
+  label: 봉인
+- id: imprisoned
+  label: 수감
+- id: missing
+  label: 실종
+- id: cursed
+  label: 저주받음
+- id: incapacitated
+  label: 부상/중태
+- id: lost
+  label: 분실
+- id: banished
+  label: 추방

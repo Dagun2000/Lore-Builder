@@ -39,6 +39,7 @@ def _init_session_state() -> None:
         "detail_relevant_show_all": False,
         "detail_confirm_delete": False,
         "dict_category_persist": None,
+        "status_effect_confirm_delete": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -406,6 +407,81 @@ def _dictionary_label(category: str, entity: dict) -> str:
     return entity.get("name") or entity["id"]
 
 
+_STATUS_EFFECTS_PSEUDO_CATEGORY = "상태 효과"
+
+
+def _status_effect_usage_count(effect_id: str) -> int:
+    """How many timeline duration records currently use effect_id as their
+    (target-less, personal-status) predicate — shown before deletion so
+    removing a status doesn't silently orphan existing records from every
+    check/dropdown that reads status_effects.yaml going forward."""
+    return sum(
+        1
+        for e in storage.list_entities("timeline")
+        if e.get("predicate") == effect_id and e.get("target") is None
+    )
+
+
+def _render_status_effects_panel() -> None:
+    """A GUI-editable status_effects.yaml (Phase 10 patch 14) — the set of
+    reversible statuses (imprisoned, cursed, ...) a world can have is a
+    setting-specific choice, not something the code should hardcode; a
+    sci-fi setting might add "cryosleep" the same way a fantasy one added
+    "imprisoned". Lives as a pseudo-category in the dictionary rather than a
+    real schema_registry.yaml category, since status effects aren't
+    entities — they never get their own id/detail screen, just this list."""
+    st.write(
+        "세계관에서 쓸 수 있는, 되돌릴 수 있는 상태(수감, 저주 등)의 목록입니다. "
+        "새 사건 입력이나 필드 수정 화면에서 바로 선택지로 나타납니다."
+    )
+
+    effects = schema.load_status_effects()
+    pending = st.session_state.status_effect_confirm_delete
+
+    for effect in effects:
+        effect_id = effect["id"]
+        col1, col2 = st.columns([4, 1])
+        col1.write(f"**{effect_id}** ({effect['label']})")
+
+        if pending != effect_id:
+            if col2.button("삭제", key=f"status_effect_delete_{effect_id}"):
+                st.session_state.status_effect_confirm_delete = effect_id
+                st.rerun()
+            continue
+
+        usage = _status_effect_usage_count(effect_id)
+        if usage:
+            st.warning(
+                f"현재 {usage}건의 기록이 이 상태를 사용하고 있습니다. 삭제해도 그 기록 "
+                "자체는 남지만, 앞으로 선택지에 나타나지 않고 상태 일관성 검증 대상에서도 "
+                "빠지게 됩니다."
+            )
+        confirm_col1, confirm_col2 = st.columns(2)
+        if confirm_col1.button("그대로 삭제", key=f"status_effect_delete_confirm_{effect_id}"):
+            schema.remove_status_effect(effect_id)
+            st.session_state.status_effect_confirm_delete = None
+            st.success(f"'{effect_id}' 상태를 삭제했습니다.")
+            st.rerun()
+        if confirm_col2.button("취소", key=f"status_effect_delete_cancel_{effect_id}"):
+            st.session_state.status_effect_confirm_delete = None
+            st.rerun()
+
+    st.divider()
+    st.subheader("새 상태 추가")
+    with st.form("status_effect_add_form", clear_on_submit=True):
+        new_id = st.text_input("id (코드에서 predicate로 쓰일 값, 영문 권장)", key="status_effect_new_id")
+        new_label = st.text_input("표시 이름", key="status_effect_new_label")
+        submitted = st.form_submit_button("추가", key="status_effect_add")
+    if submitted:
+        try:
+            schema.add_status_effect(new_id, new_label)
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.success(f"'{new_id}' ({new_label}) 상태를 추가했습니다.")
+            st.rerun()
+
+
 def render_dictionary_mode() -> None:
     """Phase 10 patch 7 (G): Streamlit drops a widget's Session State entry
     at the end of any run where that widget wasn't instantiated — and this
@@ -416,11 +492,15 @@ def render_dictionary_mode() -> None:
     "character"). dict_category_persist lives outside any widget's
     lifecycle, so it survives the round trip and can drive `index=` here."""
     st.header("딕셔너리")
-    categories = schema.list_categories()
+    categories = schema.list_categories() + [_STATUS_EFFECTS_PSEUDO_CATEGORY]
     remembered = st.session_state.dict_category_persist
     default_index = categories.index(remembered) if remembered in categories else 0
     category = st.selectbox("카테고리", categories, index=default_index, key="dict_category")
     st.session_state.dict_category_persist = category
+
+    if category == _STATUS_EFFECTS_PSEUDO_CATEGORY:
+        _render_status_effects_panel()
+        return
 
     entities = storage.list_entities(category)
     if not entities:

@@ -29,6 +29,41 @@ def load_status_effects() -> list:
     return data["status_effects"]
 
 
+def _save_status_effects(effects: list) -> None:
+    with open(STATUS_EFFECTS_PATH, "w", encoding="utf-8") as f:
+        yaml.safe_dump(
+            {"status_effects": effects}, f, allow_unicode=True, sort_keys=False, default_flow_style=False
+        )
+    load_status_effects.cache_clear()
+
+
+def add_status_effect(effect_id: str, label: str) -> None:
+    """Append a new reversible status to status_effects.yaml (a fixed set
+    the world's rules/inference/checks all read from — imprisoned, cursed,
+    ...) and bust the lru_cache so the running process sees it immediately.
+    A GUI-editable set, since a setting's cast of reversible statuses isn't
+    something the code should hardcode — a future/sci-fi world might add
+    "cryosleep" the same way a fantasy one added "imprisoned"."""
+    effect_id = (effect_id or "").strip()
+    label = (label or "").strip()
+    if not effect_id or not label:
+        raise ValueError("id와 label은 비워둘 수 없습니다.")
+    effects = load_status_effects()
+    if any(e["id"] == effect_id for e in effects):
+        raise ValueError(f"이미 존재하는 상태 효과 id입니다: {effect_id}")
+    _save_status_effects(effects + [{"id": effect_id, "label": label}])
+
+
+def remove_status_effect(effect_id: str) -> None:
+    """Remove a status from status_effects.yaml. Any existing timeline
+    record whose predicate is this id is left untouched in storage — it
+    simply stops being offered as a choice or checked for consistency going
+    forward (the caller is responsible for warning about in-use ids before
+    calling this, e.g. app.py's dictionary panel)."""
+    effects = [e for e in load_status_effects() if e["id"] != effect_id]
+    _save_status_effects(effects)
+
+
 def list_categories() -> list:
     """Return every category name in schema_registry.yaml, file order."""
     return list(load_schema_registry().keys())
