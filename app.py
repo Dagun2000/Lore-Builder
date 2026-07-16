@@ -155,7 +155,17 @@ def _render_value_field(field_def: dict, current_value, key: str, label: str | N
 # ---------------------------------------------------------------------------
 
 def _resume(session, response) -> None:
-    st.session_state.session = pipeline_session.resume_session(session.session_id, response)
+    try:
+        st.session_state.session = pipeline_session.resume_session(session.session_id, response)
+    except ValueError:
+        # A double-click on a decision button (e.g. clicking "저장" again
+        # while the first click is still being processed) can deliver a
+        # second response after this session already moved past the
+        # decision it was answering — pipeline_session.resume_session raises
+        # ValueError for that ("응답을 기다리는 결정이 없습니다"). Harmless
+        # (the first click's answer already went through), just redraw the
+        # current state instead of surfacing a traceback for it.
+        pass
     st.rerun()
 
 

@@ -11,5 +11,5 @@ status_effects:
   label: 부상/중태
 - id: lost
   label: 분실
-- id: banished
+- id: exiled
   label: 추방
