@@ -140,6 +140,43 @@ def check_lifespan_violation(
     return None
 
 
+def get_existence_range(category: str, entity_id: str) -> tuple:
+    """(earliest, latest) year entity_id can be assumed to exist — used by
+    Creator (Phase 10 patch 22) to scope a generated story to years where
+    every involved entity is actually around. A category with no lifecycle
+    fields at all is never constrained (returns (None, None), unbounded).
+
+    The lower bound falls back to the earliest year the entity is on
+    record for (storage.get_event_years) when no lifecycle_start field is
+    set — the same signal check_terminal_violation already trusts as "at
+    least existed by this year". The upper bound never gets a symmetric
+    fallback: an entity with no death/destroyed year on record is presumed
+    to still exist indefinitely, not bounded by whatever their most recent
+    recorded event happens to be — bounding it that way would forbid
+    placing any new story after the last thing we happened to record,
+    which is exactly what Creator exists to add."""
+    start_fields = schema.get_fields_with_role(category, "lifecycle_start")
+    end_fields = schema.get_fields_with_role(category, "lifecycle_end")
+    if not start_fields and not end_fields:
+        return None, None
+
+    entity = storage.get_entity(category, entity_id)
+    if entity is None:
+        return None, None
+
+    start_name = start_fields[0]["name"] if start_fields else None
+    end_name = end_fields[0]["name"] if end_fields else None
+    lower = entity.get(start_name) if start_name else None
+    upper = entity.get(end_name) if end_name else None
+
+    if lower is None:
+        years = storage.get_event_years(entity_id)
+        if years:
+            lower = min(years)
+
+    return lower, upper
+
+
 def run_hard_checks(
     category: str, entity_id: str, extra_years: list | None = None
 ) -> list[Conflict]:

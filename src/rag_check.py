@@ -93,28 +93,44 @@ def entity_field_summary(record: dict) -> str | None:
 
 
 def _duration_activity_annotation(related_event: dict, event_year: int) -> str | None:
-    """[활성]/[비활성] tag for a duration-type related event (has a
-    start_year), computed the same way storage.get_current_state does —
-    Phase 10 patch 15, A: a duration record's notes ("2010년에 추방당했다")
-    read as an unconditional current fact to an LLM with no year sense of
-    its own, so a 2009 event (before the exile even started) was judged
-    against a status that, at that point in the story, hadn't happened yet.
+    """[활성] tag for a duration-type related event (has a start_year) that
+    is actually in effect at event_year, computed the same way
+    storage.get_current_state does — Phase 10 patch 15, A: a duration
+    record's notes ("2010년에 추방당했다") read as an unconditional current
+    fact to an LLM with no year sense of its own, so a 2009 event (before
+    the exile even started) was judged against a status that, at that point
+    in the story, hadn't happened yet.
+
+    Phase 10 patch 21: the inverse [비활성] tag (plus a prompt instruction
+    telling the LLM not to treat a [비활성]-tagged record as contradiction
+    grounds) was removed — it correctly suppressed false positives against
+    a status/relationship that hadn't started yet, but the same suppression
+    also silently defeated a genuinely load-bearing case: "미라와 쟝은
+    2079년에 처음 만났다" (start_year=2079) is a boundary fact that rules
+    out anything involving both of them before 2079, and got waved off as
+    "그 사건 시점에는 적용되지 않는다" for a 2050 input that directly
+    violated it. Not-yet-started/already-ended duration records go back to
+    being plain, untagged context now — full weight, same as any other
+    fact — and only a genuinely active status gets the (harmless,
+    confirmatory) [활성] tag.
+
     Returns None for a point event (no start_year — always relevant,
-    nothing to gate) or when there's no event_year to compare against."""
+    nothing to gate), when there's no event_year to compare against, or
+    when the record isn't currently active."""
     start = related_event.get("start_year")
     if start is None or event_year is None:
         return None
     end = related_event.get("end_year")
     is_active = start <= event_year and (end is None or event_year <= end)
+    if not is_active:
+        return None
     span = f"{start}~{end if end is not None else '현재'}"
-    if is_active:
-        return f"[활성, 기간 {span}, 이 사건({event_year}년) 기준]"
-    if event_year < start:
-        return f"[비활성 — 기간 {span}이지만 이 사건({event_year}년)은 그 이전]"
-    return f"[비활성 — 기간 {span}, 이 사건({event_year}년)은 이미 해제된 이후]"
+    return f"[활성, 기간 {span}, 이 사건({event_year}년) 기준]"
 
 
-def _entity_context_lines(entities: list, event_year: int | None = None) -> list:
+def _entity_context_lines(
+    entities: list, event_year: int | None = None, extra_context: list | None = None
+) -> list:
     """Each involved entity's own stored fields + notes (including any
     self-declared exception) + its race's notes + its related events' notes
     — the exact context `check_notes_conflict` has built since Phase 10
@@ -125,25 +141,31 @@ def _entity_context_lines(entities: list, event_year: int | None = None) -> list
     self-declared exception (e.g. "체질상 마나 서클 없이도 마법 가능") both go
     invisible the moment the current sentence doesn't restate them.
 
-    `event_year`, when given, gets each duration-type related event tagged
-    with a [활성]/[비활성] annotation (Phase 10 patch 15, A) so the LLM
-    doesn't have to (mis)infer temporal relevance from prose alone — a
-    status recorded as starting in 2010 is irrelevant, not a violation, for
-    an event dated 2009.
+    `event_year`, when given, gets each duration-type related event that's
+    actually in effect at that year tagged [활성] (Phase 10 patch 15, A,
+    narrowed by patch 21) — confirmatory context, not a filter; a record
+    with no tag (not currently active, or a point event) still carries its
+    full weight in the judgment.
 
-    Token-cost trim (Phase 10 patch 18): a point event dated *after*
-    event_year is dropped from context entirely, not just annotated — unlike
-    a duration record (which might have started before event_year and still
-    be relevant), a point event that hasn't happened yet, relative to the
-    thing being checked, cannot possibly be the source of an established
-    fact this new sentence contradicts. This does NOT drop a point event at
-    or before event_year (e.g. a founding record's notes stay in context for
-    any later check against that entity), so it doesn't touch the patch 2(B)
-    case (a constraint declared only in an event's notes) — only genuinely
-    future-relative-to-this-check point events are excluded. Duration
-    records keep the annotate-don't-drop approach from patch 15, since even
-    an inactive one may still be worth the LLM seeing (recently cleared,
-    etc.)."""
+    Phase 10 patch 18 briefly dropped point events dated *after* event_year
+    from context entirely, on the theory that a point event which "hasn't
+    happened yet" (relative to what's being checked) can't be the source of
+    a contradiction. Rolled back (patch 21) — that's only true when the
+    later point event is causally independent of the earlier one. It's
+    false for a boundary fact: "쟝과 미라가 2079년에 처음 만났다" (a point
+    event) *constrains* what could have happened earlier, and inserting
+    "2050년에 쟝과 미라가 함께 놀았다" went through unchallenged because the
+    2079 meeting was excluded from context for being "in the future" of the
+    2050 event being checked — exactly backwards. Every point event's notes
+    stay in context regardless of year again; only duration records get the
+    patch 15 annotate-don't-drop treatment.
+
+    `extra_context` (Phase 10 patch 22) lets a caller append facts that
+    aren't in storage yet — specifically Creator, which validates a
+    multi-event draft sequentially before anything is saved, and needs
+    event 3's check to see events 1-2 as real context even though they're
+    still only in memory. Every existing caller passes nothing, so this is
+    additive-only for the normal chat pipeline."""
     lines = []
     for entity_id in entities:
         category = schema.category_from_id(entity_id)
@@ -171,19 +193,13 @@ def _entity_context_lines(entities: list, event_year: int | None = None) -> list
         for related_event in storage.get_events_for_entity(entity_id):
             if not related_event.get("notes"):
                 continue
-            is_point = related_event.get("start_year") is None
-            if (
-                is_point
-                and event_year is not None
-                and related_event.get("year") is not None
-                and related_event["year"] > event_year
-            ):
-                continue  # hasn't happened yet, relative to what's being checked
             annotation = _duration_activity_annotation(related_event, event_year)
             prefix = f"{annotation} " if annotation else ""
             lines.append(
                 f"{entity_id}의 관련 기록({related_event['id']}): {prefix}{related_event['notes']}"
             )
+    if extra_context:
+        lines.extend(extra_context)
     return lines
 
 
@@ -192,10 +208,14 @@ def _entity_context_lines(entities: list, event_year: int | None = None) -> list
 # ---------------------------------------------------------------------------
 
 def check_rule_violation(
-    entities: list, raw_text: str, context_docs: list, event_year: int | None = None
+    entities: list,
+    raw_text: str,
+    context_docs: list,
+    event_year: int | None = None,
+    extra_context: list | None = None,
 ) -> Judgment | None:
     docs = "\n".join(f"- {d}" for d in context_docs) if context_docs else "(관련 규칙 없음)"
-    context_lines = _entity_context_lines(entities, event_year)
+    context_lines = _entity_context_lines(entities, event_year, extra_context)
     entity_context = (
         "\n".join(f"- {line}" for line in context_lines)
         if context_lines else "(참고할 엔티티 정보 없음)"
@@ -207,10 +227,9 @@ def check_rule_violation(
         f"세계관 규칙/문서:\n{docs}\n\n"
         f"관여 엔티티의 기존 저장 정보(자기 예외 조항 포함):\n{entity_context}\n\n"
         f"사건 문장: {raw_text}\n\n"
-        "관련 기록 중 [활성]/[비활성] 표시가 붙은 것은 이 사건의 연도를 기준으로 이미 계산된 "
-        "결과다 — [비활성]으로 표시된 기록(아직 시작 전이거나 이미 해제된 상태/관계)은 이 "
-        "사건 시점에는 적용되지 않으므로, 그 기록 자체만을 근거로 위반이라고 판단하지 마라 "
-        "(단, 다른 무관한 이유로 위반이 있다면 그건 별개로 정상 판단하라).\n\n"
+        "관련 기록 중 [활성] 표시가 붙은 것은 이 사건의 연도를 기준으로 그 상태/관계가 실제로 "
+        "유효함을 뜻하는 확인 정보다 — 표시가 없다고 해서 그 기록을 무시해도 된다는 뜻은 "
+        "아니며, 다른 모든 기록과 동일하게 그 내용 그대로 판단에 반영하라.\n\n"
         "규칙이 특정 전제조건(도구, 자격, 재료 등)을 요구하는데, 사건 문장에 그 전제조건이 "
         "충족되었다는 언급이 전혀 없다면 — 굳이 결여를 명시하지 않았더라도 — 위반 가능성이 "
         "있는 것으로 판단하라. 단, 위 '관여 엔티티의 기존 저장 정보'에 그 전제조건이 이미 "
@@ -254,8 +273,13 @@ def check_rule_violation(
 # 2-3. Notes-based qualitative conflict
 # ---------------------------------------------------------------------------
 
-def check_notes_conflict(entities: list, raw_text: str, event_year: int | None = None) -> Judgment | None:
-    notes_lines = _entity_context_lines(entities, event_year)
+def check_notes_conflict(
+    entities: list,
+    raw_text: str,
+    event_year: int | None = None,
+    extra_context: list | None = None,
+) -> Judgment | None:
+    notes_lines = _entity_context_lines(entities, event_year, extra_context)
 
     if not notes_lines:
         print("[rag_check] check_notes_conflict: 참고할 notes가 없어 LLM 호출 생략")
@@ -266,10 +290,9 @@ def check_notes_conflict(entities: list, raw_text: str, event_year: int | None =
     prompt = (
         "너는 판타지 세계관의 설정 감사관이다. 아래는 관련 엔티티들의 기존 설정(notes)이다. "
         "새로 입력된 사건 문장이 이 설정과 모순되는지 판단하라.\n\n"
-        "관련 기록 중 [활성]/[비활성] 표시가 붙은 것은 이 사건의 연도를 기준으로 이미 계산된 "
-        "결과다 — [비활성]으로 표시된 기록(아직 시작 전이거나 이미 해제된 상태/관계)은 이 "
-        "사건 시점에는 적용되지 않으므로, 그 기록 자체만을 근거로 모순이라고 판단하지 마라 "
-        "(단, 다른 무관한 이유로 모순이 있다면 그건 별개로 정상 판단하라).\n\n"
+        "관련 기록 중 [활성] 표시가 붙은 것은 이 사건의 연도를 기준으로 그 상태/관계가 실제로 "
+        "유효함을 뜻하는 확인 정보다 — 표시가 없다고 해서 그 기록을 무시해도 된다는 뜻은 "
+        "아니며, 다른 모든 기록과 동일하게 그 내용 그대로 판단에 반영하라.\n\n"
         "명시적 규칙 위반뿐 아니라, 서술된 성격·위험도·상관관계와 행동/속성 사이의 모순도 "
         "확인하라:\n"
         "1. 관련 엔티티(장소, 사물, 시스템 등)의 notes/규칙에 성격·용도·제약·상관관계를 "
@@ -325,7 +348,11 @@ def check_notes_conflict(entities: list, raw_text: str, event_year: int | None =
 # ---------------------------------------------------------------------------
 
 def check_rule_and_notes(
-    entities: list, raw_text: str, context_docs: list, event_year: int | None = None
+    entities: list,
+    raw_text: str,
+    context_docs: list,
+    event_year: int | None = None,
+    extra_context: list | None = None,
 ) -> list:
     """check_rule_violation and check_notes_conflict, combined into one LLM
     call instead of two. Both checks were independently pulling the exact
@@ -340,7 +367,7 @@ def check_rule_and_notes(
     (tests call them directly) — only the integration points below switch to
     this."""
     docs = "\n".join(f"- {d}" for d in context_docs) if context_docs else "(관련 규칙 없음)"
-    context_lines = _entity_context_lines(entities, event_year)
+    context_lines = _entity_context_lines(entities, event_year, extra_context)
     entity_context = (
         "\n".join(f"- {line}" for line in context_lines)
         if context_lines else "(참고할 엔티티 정보 없음)"
@@ -353,10 +380,9 @@ def check_rule_and_notes(
         f"세계관 규칙/문서:\n{docs}\n\n"
         f"관여 엔티티의 기존 저장 정보 및 관련 기록(자기 예외 조항 포함):\n{entity_context}\n\n"
         f"사건 문장: {raw_text}\n\n"
-        "관련 기록 중 [활성]/[비활성] 표시가 붙은 것은 이 사건의 연도를 기준으로 이미 계산된 "
-        "결과다 — [비활성]으로 표시된 기록(아직 시작 전이거나 이미 해제된 상태/관계)은 이 "
-        "사건 시점에는 적용되지 않으므로, 그 기록 자체만을 근거로 위반/모순이라고 판단하지 마라 "
-        "(단, 다른 무관한 이유로 위반/모순이 있다면 그건 별개로 정상 판단하라).\n\n"
+        "관련 기록 중 [활성] 표시가 붙은 것은 이 사건의 연도를 기준으로 그 상태/관계가 실제로 "
+        "유효함을 뜻하는 확인 정보다 — 표시가 없다고 해서 그 기록을 무시해도 된다는 뜻은 "
+        "아니며, 다른 모든 기록과 동일하게 그 내용 그대로 판단에 반영하라.\n\n"
         "=== 판단 1: 세계관 규칙 위반 여부 ===\n\n"
         "규칙이 특정 전제조건(도구, 자격, 재료 등)을 요구하는데, 사건 문장에 그 전제조건이 "
         "충족되었다는 언급이 전혀 없다면 — 굳이 결여를 명시하지 않았더라도 — 위반 가능성이 "
