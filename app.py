@@ -33,9 +33,9 @@ def _init_session_state() -> None:
         "detail_previous_value": None,
         "detail_searched": False,
         "detail_conflicts": [],
-        "detail_related_docs": [],
         "detail_new_value": None,
         "detail_flag_selection": {},
+        "detail_relevant_matches": [],
         "detail_relevant_show_all": False,
         "detail_confirm_delete": False,
         "dict_category_persist": None,
@@ -68,8 +68,8 @@ def _navigate_to_entity(entity_id) -> None:
     st.session_state.detail_previous_value = None
     st.session_state.detail_searched = False
     st.session_state.detail_conflicts = []
-    st.session_state.detail_related_docs = []
     st.session_state.detail_flag_selection = {}
+    st.session_state.detail_relevant_matches = []
     st.session_state.detail_relevant_show_all = False
     st.session_state.detail_confirm_delete = False
     st.session_state.selected_entity = entity_id
@@ -448,6 +448,67 @@ def _dictionary_label(category: str, entity: dict) -> str:
     return entity.get("name") or entity["id"]
 
 
+def _entity_display_label(entity_id: str) -> str:
+    """_dictionary_label for a single id looked up from scratch — used
+    wherever a reference/pointer value needs a human-readable caption
+    (Phase 10 patch 20). Falls back to the bare id for a dangling reference
+    (the pointed-at row no longer exists) rather than erroring."""
+    category = schema.category_from_id(entity_id)
+    entity = storage.get_entity(category, entity_id) if category else None
+    return _dictionary_label(category, entity) if entity else entity_id
+
+
+def _render_entity_link(entity_id: str, key: str) -> None:
+    """A navigation button labeled with the target's own display name
+    (Phase 10 patch 20) — the shared building block for turning a reference
+    field or an event_ids entry into something clickable instead of a raw
+    id sitting in a JSON dump."""
+    if st.button(_entity_display_label(entity_id), key=key):
+        _navigate_to_entity(entity_id)
+        st.rerun()
+
+
+def _render_entity_fields(category: str, entity_id: str, entity: dict) -> None:
+    """Replaces the old raw st.json(entity) dump (Phase 10 patch 20):
+    reference fields (race, location, ...) and event_ids become clickable
+    navigation buttons via _render_entity_link, everything else is plain
+    "필드명: 값" text. Empty/null fields are skipped, same as st.json would
+    implicitly show them (as null) but with no more useful information."""
+    for field_def in schema.get_fields(category):
+        name = field_def["name"]
+        value = entity.get(name)
+        if value in (None, "", []):
+            continue
+
+        if field_def["type"] == "reference":
+            st.write(f"**{name}**")
+            _render_entity_link(value, key=f"reflink_{entity_id}_{name}")
+        elif name == "event_ids":
+            st.write(f"**{name}** ({len(value)}건)")
+            for i, eid in enumerate(value):
+                _render_entity_link(eid, key=f"reflink_{entity_id}_{name}_{i}")
+        else:
+            st.write(f"**{name}**: {value}")
+
+
+def _render_timeline_participants(entity_id: str, entity: dict) -> None:
+    """A point event doesn't store its own participant list as a field —
+    who's involved is only knowable via the reverse lookup (same one
+    _render_timeline_detail already uses to seed its "참가자" multiselect),
+    so _render_entity_fields' generic schema-field loop can't surface it.
+    A duration event needs nothing extra here: its entity/target are real
+    reference fields and already get links from _render_entity_fields."""
+    is_point = entity.get("year") is not None or entity.get("entity") is None
+    if not is_point:
+        return
+    participants = [eid for _cat, eid in storage.find_entities_referencing_event(entity_id)]
+    if not participants:
+        return
+    st.write("**참가자**")
+    for i, eid in enumerate(participants):
+        _render_entity_link(eid, key=f"reflink_{entity_id}_participants_{i}")
+
+
 _STATUS_EFFECTS_PSEUDO_CATEGORY = "Relations/Status"
 
 _STATUS_EFFECT_TYPE_LABELS = {
@@ -587,7 +648,7 @@ _EVENT_POINTER_CATEGORIES = ("character", "location", "faction", "artifact", "ra
 _RELEVANT_CONTEXT_SHOW_TOP = 3
 
 
-def _render_relevant_context_section(entity_id: str, field_name: str, new_value) -> list:
+def _render_relevant_context_section(entity_id: str, field_name: str) -> list:
     """Phase 10 patch 8 — replaces the old "dump every event this entity
     points at" panel (which showed a destroyed_year edit dawnblade's own
     forging event, etc.) with field_update.find_relevant_context: a 1-hop
@@ -602,9 +663,16 @@ def _render_relevant_context_section(entity_id: str, field_name: str, new_value)
     below (_render_save_section) can register flags for whatever's checked
     without this function needing to return anything itself; the return
     value is only for the "관련 기록이 없습니다" caller-side check.
+
+    Phase 10 patch 19: matches are read from st.session_state.
+    detail_relevant_matches, computed once by the "필드 값 검토" button
+    handler — not recomputed here. This function re-renders on every
+    unrelated widget interaction on this screen (a flag checkbox, "더보기"),
+    and find_relevant_context's LLM call has no reason to re-fire just
+    because Streamlit reran the script with the same entity/field/value.
     """
     st.subheader("관련 기록")
-    matches = field_update.find_relevant_context(entity_id, field_name, new_value)
+    matches = st.session_state.detail_relevant_matches
     if not matches:
         st.write("관련성이 있어 보이는 기록이 없습니다.")
         return matches
@@ -648,6 +716,7 @@ def _render_field_editor_section(category: str, entity_id: str, entity: dict) ->
         st.session_state.detail_searched = False
         st.session_state.detail_conflicts = []
         st.session_state.detail_flag_selection = {}
+        st.session_state.detail_relevant_matches = []
         st.session_state.detail_relevant_show_all = False
 
     field_def = next(f for f in field_defs if f["name"] == selected_field)
@@ -666,6 +735,18 @@ def _render_field_editor_section(category: str, entity_id: str, entity: dict) ->
         st.session_state.detail_searched = True
         st.session_state.detail_flag_selection = {}
         st.session_state.detail_relevant_show_all = False
+        # Computed once here (Phase 10 patch 19), not inside the render
+        # section below — that section re-renders on every unrelated widget
+        # interaction (a flag checkbox, "더보기"), and find_relevant_context
+        # is a batched LLM call that has no reason to re-fire just because
+        # Streamlit reran the script with the same entity/field/value.
+        is_lifecycle = field_def.get("role") in ("lifecycle_start", "lifecycle_end")
+        if category in _EVENT_POINTER_CATEGORIES and not is_lifecycle:
+            st.session_state.detail_relevant_matches = field_update.find_relevant_context(
+                entity_id, selected_field, new_value
+            )
+        else:
+            st.session_state.detail_relevant_matches = []
         st.rerun()
 
     if not st.session_state.detail_searched:
@@ -732,6 +813,7 @@ def _render_save_section(category: str, entity_id: str, selected_field: str) -> 
         st.session_state.detail_searched = False
         st.session_state.detail_conflicts = []
         st.session_state.detail_flag_selection = {}
+        st.session_state.detail_relevant_matches = []
         st.session_state.detail_relevant_show_all = False
         st.rerun()
 
@@ -941,7 +1023,9 @@ def render_entity_detail(entity_id: str) -> None:
         st.rerun()
 
     st.subheader("현재 필드 값")
-    st.json(entity)
+    _render_entity_fields(category, entity_id, entity)
+    if category == "timeline":
+        _render_timeline_participants(entity_id, entity)
 
     if category == "timeline":
         # Phase 10 patch 8, section 4: an event has no fields that can be
@@ -967,9 +1051,7 @@ def render_entity_detail(entity_id: str) -> None:
     is_lifecycle_field = bool(selected_field_def and selected_field_def.get("role") in ("lifecycle_start", "lifecycle_end"))
     if st.session_state.get("detail_searched"):
         if category in _EVENT_POINTER_CATEGORIES and not is_lifecycle_field:
-            _render_relevant_context_section(
-                entity_id, st.session_state.detail_field_name, st.session_state.detail_new_value
-            )
+            _render_relevant_context_section(entity_id, st.session_state.detail_field_name)
         _render_save_section(category, entity_id, st.session_state.detail_field_name)
     _render_delete_entity_section(category, entity_id)
 

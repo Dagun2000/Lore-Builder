@@ -129,7 +129,21 @@ def _entity_context_lines(entities: list, event_year: int | None = None) -> list
     with a [활성]/[비활성] annotation (Phase 10 patch 15, A) so the LLM
     doesn't have to (mis)infer temporal relevance from prose alone — a
     status recorded as starting in 2010 is irrelevant, not a violation, for
-    an event dated 2009."""
+    an event dated 2009.
+
+    Token-cost trim (Phase 10 patch 18): a point event dated *after*
+    event_year is dropped from context entirely, not just annotated — unlike
+    a duration record (which might have started before event_year and still
+    be relevant), a point event that hasn't happened yet, relative to the
+    thing being checked, cannot possibly be the source of an established
+    fact this new sentence contradicts. This does NOT drop a point event at
+    or before event_year (e.g. a founding record's notes stay in context for
+    any later check against that entity), so it doesn't touch the patch 2(B)
+    case (a constraint declared only in an event's notes) — only genuinely
+    future-relative-to-this-check point events are excluded. Duration
+    records keep the annotate-don't-drop approach from patch 15, since even
+    an inactive one may still be worth the LLM seeing (recently cleared,
+    etc.)."""
     lines = []
     for entity_id in entities:
         category = schema.category_from_id(entity_id)
@@ -157,6 +171,14 @@ def _entity_context_lines(entities: list, event_year: int | None = None) -> list
         for related_event in storage.get_events_for_entity(entity_id):
             if not related_event.get("notes"):
                 continue
+            is_point = related_event.get("start_year") is None
+            if (
+                is_point
+                and event_year is not None
+                and related_event.get("year") is not None
+                and related_event["year"] > event_year
+            ):
+                continue  # hasn't happened yet, relative to what's being checked
             annotation = _duration_activity_annotation(related_event, event_year)
             prefix = f"{annotation} " if annotation else ""
             lines.append(
@@ -299,6 +321,120 @@ def check_notes_conflict(entities: list, raw_text: str, event_year: int | None =
 
 
 # ---------------------------------------------------------------------------
+# 2-3b. Combined rule-violation + notes-conflict (Phase 10 patch 18)
+# ---------------------------------------------------------------------------
+
+def check_rule_and_notes(
+    entities: list, raw_text: str, context_docs: list, event_year: int | None = None
+) -> list:
+    """check_rule_violation and check_notes_conflict, combined into one LLM
+    call instead of two. Both checks were independently pulling the exact
+    same _entity_context_lines() context and paying for it in separate
+    reasoning-tier requests — same reasoning, same data, twice the token
+    cost, every single input. This builds that context once, asks for both
+    judgments in one JSON response, and returns whichever of the two fired
+    (0, 1, or 2 Judgments) — the per-check reasoning criteria are kept
+    completely separate within the prompt (not blended), so this changes
+    *cost*, not *what* gets judged or how. check_rule_violation/
+    check_notes_conflict themselves are untouched and still usable standalone
+    (tests call them directly) — only the integration points below switch to
+    this."""
+    docs = "\n".join(f"- {d}" for d in context_docs) if context_docs else "(관련 규칙 없음)"
+    context_lines = _entity_context_lines(entities, event_year)
+    entity_context = (
+        "\n".join(f"- {line}" for line in context_lines)
+        if context_lines else "(참고할 엔티티 정보 없음)"
+    )
+    print(f"[rag_check] check_rule_and_notes 컨텍스트:\n{entity_context}")
+
+    prompt = (
+        "너는 판타지 세계관의 규칙·설정 감사관이다. 새로 입력된 사건 문장에 대해 아래 두 가지를 "
+        "각각 독립적으로 판단하라 — 하나가 위반/모순이 아니라고 다른 하나까지 그런 것은 아니다.\n\n"
+        f"세계관 규칙/문서:\n{docs}\n\n"
+        f"관여 엔티티의 기존 저장 정보 및 관련 기록(자기 예외 조항 포함):\n{entity_context}\n\n"
+        f"사건 문장: {raw_text}\n\n"
+        "관련 기록 중 [활성]/[비활성] 표시가 붙은 것은 이 사건의 연도를 기준으로 이미 계산된 "
+        "결과다 — [비활성]으로 표시된 기록(아직 시작 전이거나 이미 해제된 상태/관계)은 이 "
+        "사건 시점에는 적용되지 않으므로, 그 기록 자체만을 근거로 위반/모순이라고 판단하지 마라 "
+        "(단, 다른 무관한 이유로 위반/모순이 있다면 그건 별개로 정상 판단하라).\n\n"
+        "=== 판단 1: 세계관 규칙 위반 여부 ===\n\n"
+        "규칙이 특정 전제조건(도구, 자격, 재료 등)을 요구하는데, 사건 문장에 그 전제조건이 "
+        "충족되었다는 언급이 전혀 없다면 — 굳이 결여를 명시하지 않았더라도 — 위반 가능성이 "
+        "있는 것으로 판단하라. 단, 위 '관여 엔티티의 기존 저장 정보'에 그 전제조건이 이미 "
+        "충족되어 있음을 보여주는 값이 있거나(예: 필요한 자원을 이미 보유한 것으로 저장됨), "
+        "해당 엔티티에게 적용되는 명시적 예외 조항이 있다면 — 사건 문장에 재언급이 없어도 — "
+        "그 정보를 근거로 위반이 아니라고 판단하라. 규칙이 금지하는 행위 자체가 문장에 "
+        "등장하고, 기존 저장 정보에도 전제조건 충족이나 예외를 뒷받침할 근거가 전혀 없다면 "
+        "위반 쪽으로 판단하는 것이 기본값이다.\n\n"
+        "규칙에 상관관계(정도-비례) 조항이 있는 경우 — 예: \"많을수록 강하다\" 같이 수치와 "
+        "어떤 속성이 비례하는 규칙 — 판단은 \"최소치를 충족했는가\"가 아니라 전체 범위에서 "
+        "상대적으로 어느 위치인가로 하라. 예를 들어 범위가 1~10일 때 2나 3은 최소치(1)는 "
+        "아니지만 여전히 하위권이라, \"매우 강력하다\"/\"엄청나게 강력하다\" 같은 극단적으로 "
+        "높은 평가와는 여전히 안 어울린다. 사건 문장이나 관여 엔티티의 저장 정보에 스스로 "
+        "주장하는 평판·능력 서술이 있다면, 그 서술이 자신이 가진 수치와 상관관계상 앞뒤가 "
+        "맞는지 반드시 확인하라. 단, 규칙 자체에 \"보통 도달하기 어렵다\", \"대부분 OO 수준에 "
+        "머문다\" 같은 난이도·분포에 대한 예외·완화 조항이 있다면, 단순 절대 수치가 아니라 "
+        "그 조항이 암시하는 실제 난이도를 기준으로 판단하라 — 그런 예외 조항이 없을 때만 "
+        "범위 내 위치로 대략 판단하라.\n\n"
+        "=== 판단 2: 설정(notes) 모순 여부 ===\n\n"
+        "명시적 규칙 위반뿐 아니라, 서술된 성격·위험도·상관관계와 행동/속성 사이의 모순도 "
+        "확인하라:\n"
+        "1. 관련 엔티티(장소, 사물, 시스템 등)의 notes/규칙에 성격·용도·제약·상관관계를 "
+        "규정하는 서술이 있는지 확인하라. 규정하는 서술의 예:\n"
+        "   - 위험도/성격 (\"목숨이 위험하다\", \"결투를 하는 곳이다\")\n"
+        "   - 접근 제약 (\"출입 금지\", \"선택받은 자만\")\n"
+        "   - 효과 강도 (\"일상생활이 불가능하다\")\n"
+        "   - 상관관계 (\"많을수록 강하다\", \"적을수록 약하다\" 같은 정도-비례 규칙)\n"
+        "2. 이런 서술이 있으면, 새로 입력된 행동이나 다른 엔티티의 자기 서술이 그 규정의 "
+        "통상적 함의와 정면으로 반대되는지 판단하라.\n"
+        "   - 위험/제약이 명시된 대상에서 안전하고 여유로운 행동(피크닉, 산책, 낮잠 등)을 "
+        "하면 -> 모순 후보\n"
+        "   - 반대로 안전하다고 명시된 대상에서 위험하거나 폭력적인 사건이 발생하면 -> 모순 "
+        "후보\n"
+        "   - 상관관계 규칙이 있는 경우, 한 엔티티가 스스로 주장하는 속성(평판, 능력 등)이 그 "
+        "상관관계상 자신이 가진 다른 값과 앞뒤가 맞는지도 확인하라(위 판단 1과 동일한 상대적 "
+        "위치 기준을 적용하라).\n"
+        "3. 단, 다음의 경우 모순으로 보지 않는다:\n"
+        "   - 행동이 발생한 위치나 맥락이 그 규정이 적용되는 범위 밖임이 문장에 명시된 경우 "
+        "(예: \"결투를 하는 투기장\"이어도, 행동이 \"관중석\"처럼 위험 구역과 구분되는 별도 "
+        "장소에서 일어났다면 자연스러운 상황일 수 있다)\n"
+        "   - 행동 자체가 이미 그 위험/제약을 인지하고 대응하는 것으로 보이는 경우(전투, "
+        "경계, 도주 등)\n"
+        "4. 판단이 애매하면 확신 없이도 모순 가능성이 있다고 보고하라 — 최종 판단은 사람이 "
+        "확인 후 결정하므로, 놓치는 것보다 애매하게라도 짚어주는 쪽이 낫다. 확신이 없다는 걸 "
+        "reason에 명시해도 된다.\n\n"
+        "아래 JSON 형식으로만 답하라 (다른 텍스트 금지):\n"
+        "{\n"
+        '  "rule_violation": {"violation": true 또는 false, "reason": "위반 시에만", '
+        '"confidence": "위반 시에만, 0.0~1.0"},\n'
+        '  "notes_conflict": {"conflict": true 또는 false, "reason": "모순 시에만"}\n'
+        "}\n"
+    )
+
+    raw = _invoke_llm(prompt)
+    data = _extract_json(raw)
+    judgments = []
+
+    rule_data = data.get("rule_violation") or {}
+    if rule_data.get("violation"):
+        print(f"[rag_check] check_rule_and_notes: 규칙 위반 감지 — {rule_data.get('reason', '')}")
+        judgments.append(
+            Judgment(type="rule_violation", reason=rule_data.get("reason", ""), confidence=rule_data.get("confidence"))
+        )
+    else:
+        print("[rag_check] check_rule_and_notes: 규칙 위반 없음")
+
+    notes_data = data.get("notes_conflict") or {}
+    if notes_data.get("conflict"):
+        print(f"[rag_check] check_rule_and_notes: 설정 모순 감지 — {notes_data.get('reason', '')}")
+        judgments.append(Judgment(type="notes_conflict", reason=notes_data.get("reason", "")))
+    else:
+        print("[rag_check] check_rule_and_notes: 설정 모순 없음")
+
+    return judgments
+
+
+# ---------------------------------------------------------------------------
 # 2-4. Reversible status consistency
 # ---------------------------------------------------------------------------
 
@@ -375,38 +511,21 @@ def run_entity_creation_checks(entities: list, raw_text: str) -> list:
     + notes-conflict judgments as run_rag_checks, minus
     check_status_consistency — that check is anchored to a specific
     event_year, which a year-less attribute creation doesn't have."""
-    judgments = []
-
     hard_rule_docs = _get_hard_rule_texts()
-    rule_judgment = check_rule_violation(entities, raw_text, hard_rule_docs)
-    if rule_judgment is not None:
-        judgments.append(rule_judgment)
-
-    notes_judgment = check_notes_conflict(entities, raw_text)
-    if notes_judgment is not None:
-        judgments.append(notes_judgment)
-
-    return judgments
+    return check_rule_and_notes(entities, raw_text, hard_rule_docs)
 
 
 def run_rag_checks(entities: list, raw_text: str, event_year: int) -> list:
     print(f"[rag_check] run_rag_checks 호출: entities={entities}, year={event_year}")
-    judgments = []
 
-    # check_rule_violation gets the canonical hard-rule texts plus each
+    # check_rule_and_notes gets the canonical hard-rule texts plus each
     # involved entity's own stored context (Phase 10 patch 10, B) — not the
     # generic similarity-search context_docs, since mixing in unrelated
     # retrieved documents was observed to dilute the prompt enough that an
     # actual violation went undetected. retrieve_context() stays available
     # as a general-purpose utility, just not fed into this specific check.
     hard_rule_docs = _get_hard_rule_texts()
-    rule_judgment = check_rule_violation(entities, raw_text, hard_rule_docs, event_year)
-    if rule_judgment is not None:
-        judgments.append(rule_judgment)
-
-    notes_judgment = check_notes_conflict(entities, raw_text, event_year)
-    if notes_judgment is not None:
-        judgments.append(notes_judgment)
+    judgments = check_rule_and_notes(entities, raw_text, hard_rule_docs, event_year)
 
     for entity_id in entities:
         status_judgment = check_status_consistency(entity_id, raw_text, event_year)

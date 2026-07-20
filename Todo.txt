@@ -1,0 +1,36 @@
+    Add English setting
+    Add visualization
+    Add stuff to GUI, mainly hyperlink like things in dictionaries.
+    Add alternate AI provider options like ollama or other things .
+    Keep checking for edge cases and bugs
+    Polish the UX
+    If possible, cut down on tokens used.
+    Anything else?
+
+
+
+    ---------------------------------------------------------------------------------------------
+
+    fixes
+    Token Diet{
+
+    Cut down on token by removing duplicate LLM calls on the same thing in one call(conflict, check rule violation)
+
+    Made anything that happens after a point event(not events like become imprisoned, but events like got into a brawl), 
+    one time events, not put into context anything that happends after the year the point event happened, as it 
+    logically doesn't need them. Jang getting into a fight in 2000 will not need to know jang getting beat up in 2010. 
+    However, duration events like got imprisoned, became enemies, etc still sees future events, as, it should know if, 
+    for example you added jang and mira got married in 2050, but in 2060, you had already put in that they were mortal 
+    enemies; not necessarily an error, as they could have gotten into a fight and divorced, but worth flagging the 
+    author of it's existance. Events like died, was born, or similarly, when editting characters, future events should
+    be hardchecked and referenced as usual. 
+
+    Found problem: hard checks run after LLM, which wastes tokens as a hard check refusal will void any LLM checks
+    Reordered this to fix.
+
+    Downgraded model; reasoning was being used when simple was enough.
+
+    }
+
+    bugfix: Death year hardcheck not running when create event->add death event before said event. Fixed.
+    bugfix: Birth year wasn't hardchecked at all.

@@ -14,14 +14,23 @@ class Conflict:
 
 
 def check_terminal_violation(
-    category: str, entity_id: str, extra_years: list | None = None
+    category: str,
+    entity_id: str,
+    extra_years: list | None = None,
+    candidate_start: int | None = None,
+    candidate_end: int | None = None,
 ) -> Conflict | None:
     """lifecycle_start <= min(event years) and lifecycle_end >= max(event years).
 
     `extra_years` lets a caller include a candidate event's year that hasn't
     been persisted yet — e.g. Phase 5's pipeline runs this check *before*
     archivist writes the new timeline record, so storage.get_event_years()
-    alone can't see the event currently being submitted."""
+    alone can't see the event currently being submitted.
+
+    `candidate_start`/`candidate_end` let a caller check a lifecycle field
+    value that hasn't been written to the entity yet either — e.g. whether
+    setting death_year=2060 would conflict with an already-recorded 2080
+    event, checked *before* death_year is actually saved."""
     start_fields = schema.get_fields_with_role(category, "lifecycle_start")
     end_fields = schema.get_fields_with_role(category, "lifecycle_end")
     if not start_fields and not end_fields:
@@ -33,8 +42,12 @@ def check_terminal_violation(
 
     start_name = start_fields[0]["name"] if start_fields else None
     end_name = end_fields[0]["name"] if end_fields else None
-    start_value = entity.get(start_name) if start_name else None
-    end_value = entity.get(end_name) if end_name else None
+    start_value = candidate_start if candidate_start is not None else (
+        entity.get(start_name) if start_name else None
+    )
+    end_value = candidate_end if candidate_end is not None else (
+        entity.get(end_name) if end_name else None
+    )
 
     if start_value is None and end_value is None:
         return None

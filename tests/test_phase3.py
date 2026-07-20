@@ -60,6 +60,20 @@ def test_check_notes_conflict_detects_elf_eating_meat():
     assert judgment.type == "notes_conflict"
 
 
+def test_check_rule_and_notes_combined_still_detects_notes_conflict():
+    # Phase 10 patch 18: check_rule_violation + check_notes_conflict merged
+    # into one LLM call to cut redundant context-resending. Same fixture as
+    # test_check_notes_conflict_detects_elf_eating_meat, run through the
+    # combined entry point instead, to confirm the merge doesn't lose either
+    # judgment type in the process.
+    hard_rule_docs = rag_check._get_hard_rule_texts()
+    judgments = rag_check.check_rule_and_notes(
+        ["char_mira"], "미라가 사냥한 고기를 먹었다.", hard_rule_docs
+    )
+
+    assert any(j.type == "notes_conflict" for j in judgments)
+
+
 def test_no_false_positives_for_mundane_event():
     # Uses char_mira (no active status_effect) rather than char_jang, since
     # char_jang carries an unresolved "imprisoned" status from the seed data

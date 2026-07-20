@@ -569,11 +569,10 @@ def _pipeline_generator(session: PipelineSession):
     )
     session.inferred_event = inferred_event
 
-    rag_judgments = rag_check.run_rag_checks(
-        list(resolved_entities.values()), parsed.raw_text, primary_year
-    )
-    session.rag_judgments = rag_judgments
-
+    # Hard checks run before rag_check, not after: they're free (no LLM
+    # call) and a blocking conflict here means the input is rejected
+    # outright — no point paying for an LLM contradiction check on an
+    # input that's about to be thrown out anyway.
     conflicts = []
     for entity_id in resolved_entities.values():
         category = schema.category_from_id(entity_id)
@@ -586,6 +585,40 @@ def _pipeline_generator(session: PipelineSession):
         is_present = inferred_event.entity_presence.get(entity_id, True)
         extra_years = list(remaining_years) if is_present else None
         conflicts.extend(hard_check.run_hard_checks(category, entity_id, extra_years=extra_years))
+
+        # This event may later prompt to set a not-yet-recorded terminal
+        # field (death_year/disbanded_year/...) — see the entity_terminal_
+        # status flow below. That write happens *after* the checks above,
+        # so it needs its own check now, against the candidate value,
+        # before anything is saved — otherwise a death dated earlier than
+        # an already-recorded later event would go through unchecked.
+        if inferred_event.terminal_entities.get(entity_id):
+            end_fields = schema.get_fields_with_role(category, "lifecycle_end")
+            if end_fields:
+                end_field = end_fields[0]["name"]
+                entity = storage.get_entity(category, entity_id)
+                if entity is not None and entity.get(end_field) is None:
+                    candidate_conflict = hard_check.check_terminal_violation(
+                        category, entity_id, extra_years=extra_years, candidate_end=primary_year
+                    )
+                    if candidate_conflict is not None:
+                        conflicts.append(candidate_conflict)
+
+        # Mirror image of the terminal check above: an already-existing
+        # entity's own birth/founding stated *after* it already has other
+        # events on record is the same kind of lifecycle contradiction,
+        # just at the start boundary instead of the end.
+        if inferred_event.genesis_entities.get(entity_id):
+            start_fields = schema.get_fields_with_role(category, "lifecycle_start")
+            if start_fields:
+                start_field = start_fields[0]["name"]
+                entity = storage.get_entity(category, entity_id)
+                if entity is not None and entity.get(start_field) is None:
+                    candidate_conflict = hard_check.check_terminal_violation(
+                        category, entity_id, extra_years=extra_years, candidate_start=primary_year
+                    )
+                    if candidate_conflict is not None:
+                        conflicts.append(candidate_conflict)
     session.hard_check_conflicts = conflicts
 
     ok = yield from _review_hard_check_conflicts_gen(conflicts)
@@ -596,6 +629,11 @@ def _pipeline_generator(session: PipelineSession):
             "resolved_entities": resolved_entities,
             "conflicts": conflicts,
         }
+
+    rag_judgments = rag_check.run_rag_checks(
+        list(resolved_entities.values()), parsed.raw_text, primary_year
+    )
+    session.rag_judgments = rag_judgments
 
     ok = yield from _review_rag_judgments_gen(rag_judgments)
     if not ok:

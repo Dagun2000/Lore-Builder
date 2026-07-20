@@ -20,3 +20,6 @@ status_effects:
 - id: exiled
   label: 추방
   type: relational
+- id: friends_with
+  label: friends_with
+  type: relational

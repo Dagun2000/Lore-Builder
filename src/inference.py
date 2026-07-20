@@ -38,6 +38,15 @@ class InferredEvent:
     # inference.infer_new_entity_attributes), so this only matters for
     # entities that already existed before this input.
     terminal_entities: dict = field(default_factory=dict)
+    # Mirrors terminal_entities but for the opposite boundary: entity_id ->
+    # True if this event explicitly states that *already-existing* entity's
+    # own origin (birth/founding/creation). A brand-new entity gets its
+    # lifecycle_start field filled at creation time instead (see
+    # infer_new_entity_attributes) — this only matters for an entity that
+    # already had other events on record before this input, so hard_check
+    # can catch "born after already having done something" the same
+    # deterministic way it catches "died before doing something later".
+    genesis_entities: dict = field(default_factory=dict)
     # Phase 10 patch 6.5 (C): a single cohesive scene (is_single_event True)
     # can still need more than one timeline record — e.g. two different
     # entities' membership facts plus a shared duel/death. Each item here
@@ -50,14 +59,14 @@ class InferredEvent:
     ambiguity_reason: str | None = None
 
 
-def _get_llm():
+def _get_llm(tier: str = "reasoning"):
     from langchain_openai import ChatOpenAI
 
-    return ChatOpenAI(model=config.get_model("reasoning"), temperature=0)
+    return ChatOpenAI(model=config.get_model(tier), temperature=0)
 
 
-def _invoke_llm(prompt: str) -> str:
-    response = _get_llm().invoke(prompt)
+def _invoke_llm(prompt: str, tier: str = "reasoning") -> str:
+    response = _get_llm(tier).invoke(prompt)
     return getattr(response, "content", str(response)).strip()
 
 
@@ -209,6 +218,13 @@ def infer_event(resolved_entities: dict, raw_text: str, years: list) -> Inferred
         "predicate=imprisoned이면서 동시에 target=알카미아의 entity_id여야 한다(수감시킨 "
         "장소가 문장에 명시되어 있으므로). 문장에 대상이 전혀 언급되지 않은 경우(예: '저주받았다'"
         ")에만 target을 null로 둬라 — 명시되지 않은 대상을 추측해서 채우지는 마라.\n\n"
+        "duration_effect의 target은 항상 entity_id 하나다 — 리스트를 넣지 마라. 그런데 "
+        "문장이 셋 이상의 엔티티가 서로 동등하게 얽히는 상호적/그룹 관계(예: 'A, B, C가 모두 "
+        "친구가 되었다', 'A, B, C가 동맹을 맺었다')를 서술한다면, 그 관계는 한 쌍(entity, "
+        "target)짜리 레코드 하나로는 다 담을 수 없다 — 관련된 모든 두 엔티티 쌍마다 하나씩 "
+        "레코드를 만들어라(예: A-B, A-C, B-C 세 개). 가장 핵심적인 쌍 하나만 위의 "
+        "event_type/duration_effect에 채우고, 나머지 쌍들은 아래 additional_records에 "
+        "각각 하나씩 채워라 — 특정 엔티티가 대상 목록에서 조용히 빠지는 일이 없어야 한다.\n\n"
         "point면 event_summary(한 줄 요약)와 involved_entities(이 사건에 실제로 관련된 "
         "entity_id 목록 — 보통 사용 가능한 entity_id 전부)를 채워라.\n\n"
         "entity_presence: 사용 가능한 entity_id 각각에 대해, 이 사건이 그 엔티티가 이 "
@@ -222,6 +238,9 @@ def infer_event(resolved_entities: dict, raw_text: str, years: list) -> Inferred
         "완전하고 돌이킬 수 없는 종료(죽음, 파괴, 해체 등)를 명시적으로 서술하는지(true) "
         "판단하라. 단순히 다치거나, 위험에 처하거나, 사라졌다(실종)는 정도로는 true가 아니다 "
         "— 죽음/파괴/해체처럼 명백히 최종적인 서술일 때만 true, 그 외 전부 false.\n\n"
+        "genesis_entities: 사용 가능한 entity_id 각각에 대해, 이 사건이 그 엔티티 자신의 "
+        "탄생/창단/창조(태어났다, 창단되었다, 만들어졌다 등)를 명시적으로 서술하는지(true) "
+        "판단하라. terminal_entities와 정반대 방향의 판단이다 — 그 외 전부 false.\n\n"
         "additional_records (하나의 응집된 장면에 레코드가 여러 개 필요한 경우): "
         "is_single_event가 true인 하나의 응집된 장면이라도, 서로 다른 대상에 대한 여러 "
         "지속 관계/상태(duration) 사실이 함께 서술되어 있거나, 지속 관계/상태 서술과 별개의 "
@@ -248,6 +267,7 @@ def infer_event(resolved_entities: dict, raw_text: str, years: list) -> Inferred
         '  } 또는 null,\n'
         '  "entity_presence": {"entity_id": true 또는 false, ...},\n'
         '  "terminal_entities": {"entity_id": true 또는 false, ...},\n'
+        '  "genesis_entities": {"entity_id": true 또는 false, ...},\n'
         '  "additional_records": [\n'
         '    {\n'
         '      "event_type": "point 또는 duration",\n'
@@ -290,6 +310,7 @@ def infer_event(resolved_entities: dict, raw_text: str, years: list) -> Inferred
                 duration_effect=data.get("duration_effect"),
                 entity_presence=data.get("entity_presence") or {},
                 terminal_entities=data.get("terminal_entities") or {},
+                genesis_entities=data.get("genesis_entities") or {},
                 additional_records=additional_records,
                 is_single_event=True,
                 ambiguity_reason=None,
@@ -419,8 +440,11 @@ def infer_new_entity_attributes(category: str, tag: str, context_sentence: str, 
         '"narrative_years": [], "notes": null}로 답하라.\n'
     )
 
+    # "simple" tier (Phase 10 patch 19) — this is a mechanical 3-way sentence
+    # split (lifecycle field vs. event vs. trait), not a world-consistency
+    # judgment like infer_event's, so it doesn't need the reasoning tier.
     try:
-        data = _extract_json(_invoke_llm(prompt))
+        data = _extract_json(_invoke_llm(prompt, tier="simple"))
     except Exception:
         return empty_result
 
