@@ -501,7 +501,14 @@ def _render_timeline_participants(entity_id: str, entity: dict) -> None:
     is_point = entity.get("year") is not None or entity.get("entity") is None
     if not is_point:
         return
-    participants = [eid for _cat, eid in storage.find_entities_referencing_event(entity_id)]
+    # The reverse lookup also catches the location itself (it points back
+    # at this event_id the same way a character or artifact does) — already
+    # shown separately as "장소" above, so it's filtered out here rather
+    # than changed at the storage layer, which other code may depend on.
+    location_id = entity.get("location")
+    participants = [
+        eid for _cat, eid in storage.find_entities_referencing_event(entity_id) if eid != location_id
+    ]
     if not participants:
         return
     st.write("**참가자**")
