@@ -14,7 +14,7 @@ the goal is being able to repeat every CLI test scenario through the GUI.
 
 import streamlit as st
 
-from src import creator_session, deletion, field_update, flags, hard_check, pipeline_session, schema, storage
+from src import creator, creator_session, deletion, field_update, flags, hard_check, pipeline_session, schema, storage
 
 _NAME_BEARING_CATEGORIES = ("character", "location", "faction", "artifact", "race")
 
@@ -29,6 +29,7 @@ def _init_session_state() -> None:
         "session": None,
         "creator_history": [],
         "creator_session": None,
+        "creator_new_entity_categories": {},
         "selected_entity": None,
         "_last_mode": None,
         "detail_field_name": None,
@@ -518,6 +519,11 @@ def _render_creator_exhausted(session, decision, key_prefix) -> None:
     payload = decision.payload
     st.warning(f"{payload['attempts']}회 시도했지만 검증을 통과하지 못했습니다.")
     st.caption(f"마지막 반려 사유: {payload['reason']}")
+    new_entities = payload.get("new_entities") or []
+    if new_entities:
+        st.write("마지막 시도에서 생성될 뻔한 엔티티:")
+        for ent in new_entities:
+            st.write(f"- {ent['fields'].get('name') or ent['entity_id']} ({ent['category']})")
     st.write("마지막으로 시도된 초안:")
     for e in payload["events"]:
         year = e["year"] if e["event_type"] == "point" else e["start_year"]
@@ -540,28 +546,61 @@ def _render_creator_edit_conflict(session, decision, key_prefix) -> None:
 
 
 def _render_creator_final_review(session, decision, key_prefix) -> None:
+    """Which year field(s) are editable depends on the duration event's own
+    action (Phase 10 patch 22 follow-up) — a "clear" (e.g. lifting an
+    exile/release from prison) only ever carries end_year; start_year
+    belongs to the *original* record being closed, not this one, and is
+    legitimately None here. Rendering a start_year box unconditionally for
+    every duration event crashed on int(None) the moment a clear action
+    showed up in a real draft."""
     payload = decision.payload
+    new_entities = payload.get("new_entities") or []
+    if new_entities:
+        st.write("**새로 생성될 엔티티**")
+        for ent in new_entities:
+            label = ent["fields"].get("name") or ent["entity_id"]
+            st.write(f"- {label} ({ent['category']})")
+            if ent["fields"].get("notes"):
+                st.caption(ent["fields"]["notes"])
+        st.divider()
+
     st.write("**최종 검토** — 사건별로 연도를 확인/수정할 수 있습니다.")
     year_widgets = {}
     for e in payload["events"]:
         idx = e["index"]
         st.write(f"{idx + 1}. [{e['event_type']}] {e['notes']}")
+        entries = []
         if e["event_type"] == "point":
             new_year = st.number_input("연도", value=e["year"], step=1, key=f"{key_prefix}_year_{idx}")
-            year_widgets[idx] = ("year", e["year"], int(new_year))
+            entries.append(("year", e["year"], new_year))
         else:
-            new_start = st.number_input(
-                "시작 연도", value=e["start_year"], step=1, key=f"{key_prefix}_start_{idx}"
-            )
-            year_widgets[idx] = ("start_year", e["start_year"], int(new_start))
+            action = (e.get("duration_effect") or {}).get("action", "set")
+            if action in ("set", "set_closed"):
+                new_start = st.number_input(
+                    "시작 연도", value=e["start_year"], step=1, key=f"{key_prefix}_start_{idx}"
+                )
+                entries.append(("start_year", e["start_year"], new_start))
+            if action in ("clear", "set_closed"):
+                new_end = st.number_input(
+                    "종료 연도", value=e["end_year"], step=1, key=f"{key_prefix}_end_{idx}"
+                )
+                entries.append(("end_year", e["end_year"], new_end))
+        year_widgets[idx] = entries
         st.divider()
 
     col1, col2, col3 = st.columns(3)
     if col1.button("저장", key=f"{key_prefix}_save"):
         edits = {}
-        for idx, (field_name, original, new_value) in year_widgets.items():
-            if new_value != original:
-                edits[str(idx)] = {field_name: new_value}
+        for idx, entries in year_widgets.items():
+            idx_edits = {}
+            for field_name, original, new_value in entries:
+                # A blank spinner (never touched, or cleared by the user)
+                # comes back as None -- treat as "no change" rather than
+                # trying to save a null year onto a field that requires one.
+                if new_value is not None and new_value != original:
+                    idx_edits[field_name] = int(new_value)
+            if idx_edits:
+                edits[str(idx)] = idx_edits
         _resume_creator(session, {"action": "save", "year_edits": edits})
     if col2.button("취소", key=f"{key_prefix}_cancel"):
         _resume_creator(session, {"action": "cancel"})
@@ -601,18 +640,57 @@ def _describe_creator_result(result: dict) -> str:
     if status == "saved":
         applied = result.get("applied", [])
         creates = [c.entity_id for c in applied if c.action == "create" and c.category == "timeline"]
-        return f"저장 완료: {len(creates)}개의 사건이 생성되었습니다. ({', '.join(creates)})"
+        new_entities = [c.entity_id for c in applied if c.action == "create" and c.category != "timeline"]
+        message = f"저장 완료: {len(creates)}개의 사건이 생성되었습니다. ({', '.join(creates)})"
+        if new_entities:
+            message += f" 새로 생성된 엔티티: {', '.join(new_entities)}."
+        return message
     return "완료되었습니다."
 
 
+def _render_new_entity_checkboxes() -> set:
+    """One checkbox per eligible category (Phase 10 patch 22, B), generated
+    from schema.list_categories() — not a hardcoded list, so a category
+    added later shows up automatically. Off by default, matching the
+    checkboxes' own off-by-default intent: supporting-entity creation is
+    something opted into per-request, not a standing behavior.
+
+    Backed by st.session_state.creator_new_entity_categories (a plain dict,
+    not the checkboxes' own widget keys) — confirmed via direct testing
+    that a checkbox's own key-based session_state value gets cleared the
+    moment it isn't rendered for one script run (e.g. switching to
+    딕셔너리 mode and back), which reset every checkbox to unchecked on
+    return. Explicitly passing value=stored.get(category, False) on every
+    render, and writing the result back to the same persisted dict, keeps
+    the checked state alive across mode switches regardless of what
+    Streamlit does with the widget's own key in between."""
+    stored = st.session_state.creator_new_entity_categories
+    allowed = set()
+    with st.expander("+ 조연 엔티티 생성 허용"):
+        st.caption(
+            "체크한 카테고리에 한해 Creator가 필요하면 새로운 조연 엔티티를 만들 수 있습니다 "
+            "(예: '여러 사람' 대신 '카라반 마스터 밥'). 장소/사물/세력의 기존 항목은 이 설정과 "
+            "무관하게 항상 자연스럽게 활용됩니다 — 여기서는 새로 만드는 것만 켜고 끕니다."
+        )
+        for category in creator.eligible_categories():
+            checked = st.checkbox(
+                category, value=stored.get(category, False), key=f"creator_new_{category}"
+            )
+            stored[category] = checked
+            if checked:
+                allowed.add(category)
+    return allowed
+
+
 def render_creator_mode() -> None:
+    allowed_new_categories = _render_new_entity_checkboxes()
     text = st.chat_input(
         "[ ]로 태그된 엔티티와 만들고 싶은 이야기를 입력하세요 "
         "(예: [쟝]과 [미라]가 원수가 되는 이야기, 2100년에)"
     )
     if text:
         st.session_state.creator_history.append({"role": "user", "content": text})
-        st.session_state.creator_session = creator_session.start_session(text)
+        st.session_state.creator_session = creator_session.start_session(text, allowed_new_categories)
 
     for msg in st.session_state.creator_history:
         with st.chat_message(msg["role"]):

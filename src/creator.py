@@ -15,9 +15,29 @@ import json
 import re
 from dataclasses import dataclass, field
 
-from . import config, hard_check, rag_check, schema, storage
+from . import archivist, config, hard_check, rag_check, schema, storage
 
 MAX_EVENTS = 5
+MAX_NEW_ENTITIES = 3
+
+# Categories Creator can ever touch (new-entity creation or backdrop
+# reference) are every schema category except system (world rules, never
+# author-narrated) and timeline (that's the event itself, not a cast/prop
+# entity). Computed from the schema, not a hardcoded list, so a category
+# added later shows up automatically — same reasoning as the GUI checkboxes.
+_EXCLUDED_CATEGORIES = {"system", "timeline"}
+# Categories whose *existing* entities Creator may reference naturally even
+# when not tagged — backdrop, not narrative agents (a sword or a tavern
+# doesn't have agency; a character does). character/race stay tagged-only
+# for existing entities regardless of the new-entity-creation toggles below
+# — if the user wants an existing character involved, they tag them; the
+# risk of an uninvited character with their own history showing up in a
+# story isn't worth the convenience, unlike an uninvited sword or building.
+_BACKDROP_CATEGORIES = {"location", "artifact", "faction"}
+
+
+def eligible_categories() -> list:
+    return [c for c in schema.list_categories() if c not in _EXCLUDED_CATEGORIES]
 
 _TAG_PATTERN = re.compile(r"\[([^\[\]]+)\]")
 _YEAR_RANGE_PATTERN = re.compile(r"(\d+)\s*년?\s*(?:부터|[~\-])\s*(\d+)\s*년(?:\s*까지)?")
@@ -160,6 +180,24 @@ class DraftEvent:
 
 
 @dataclass
+class DraftEntity:
+    """A brand-new supporting entity Creator invented (only ever possible
+    when its category's checkbox is on). `entity_id` is already a real,
+    final id (minted via archivist.generate_id the moment the draft is
+    parsed, same collision-checked mechanism timeline records already use)
+    — not a placeholder needing later resolution, so every DraftEvent field
+    that references it is a normal entity_id string from the start, same
+    as any pre-existing entity. Nothing is written to storage until the
+    draft is human-approved and saved; minting the id early is just a
+    string computation (archivist.generate_id never writes), so a
+    discarded/retried draft leaves nothing behind to clean up."""
+
+    entity_id: str
+    category: str
+    fields: dict  # e.g. {"name": "밥", "notes": "...", "category": "mercenary_guild"}
+
+
+@dataclass
 class NarrativeDraft:
     events: list  # list[DraftEvent]
     # Creator's own unconstrained judgment of how many events this story
@@ -175,6 +213,7 @@ class NarrativeDraft:
     # the same 4-into-1-year case) — dropped in favor of this simpler,
     # structural signal that doesn't depend on a second subjective judgment.
     natural_event_count: int
+    new_entities: list = field(default_factory=list)  # list[DraftEntity]
 
 
 def _get_llm():
@@ -198,6 +237,94 @@ def _extract_json(raw: str) -> dict:
     if not match:
         raise ValueError(f"응답에서 JSON을 찾을 수 없습니다: {raw!r}")
     return json.loads(match.group(0))
+
+
+def _range_overlaps(e_lower, e_upper, lower: int, upper: int) -> bool:
+    """False only when the two ranges are provably disjoint — None on
+    either side of the entity's own range means unbounded in that
+    direction, so it can never be the side that disqualifies it."""
+    if e_upper is not None and e_upper < lower:
+        return False
+    if e_lower is not None and e_lower > upper:
+        return False
+    return True
+
+
+def _backdrop_entities_block(lower: int, upper: int) -> str:
+    """Existing entities of the backdrop categories (location/artifact/
+    faction) — shown so Creator can naturally reference them (Phase 10
+    patch 22, B), same reasoning as the original location-only version this
+    replaces: a duel referencing an existing named sword, or a scene set at
+    an existing tavern, enriches a story without the narrative-agency risk
+    an uninvited *character* would carry (see module-level comment on
+    _BACKDROP_CATEGORIES).
+
+    Filtered to entities whose own existence range (hard_check.
+    get_existence_range — founded/created_year ~ destroyed_year) actually
+    overlaps [lower, upper] — found in practice: a destroyed-in-1200
+    location still showed up as an option for a 2055-2059 story, so
+    Creator kept picking it, hard_check kept rejecting it, and every one of
+    4 retries burned itself out on the same unwinnable choice. Filtering
+    here means it's never offered in the first place, the same "fix it
+    before Creator runs, not after" principle the year-window computation
+    already applies to characters."""
+    lines = []
+    for category in sorted(_BACKDROP_CATEGORIES & set(schema.list_categories())):
+        for e in storage.list_entities(category):
+            e_lower, e_upper = hard_check.get_existence_range(category, e["id"])
+            if not _range_overlaps(e_lower, e_upper, lower, upper):
+                continue
+            label = e.get("name") or e["id"]
+            lines.append(f'- {e["id"]} ("{label}", {category})')
+    return "\n".join(lines) if lines else "(등록된 항목 없음)"
+
+
+def _new_entity_category_block(allowed_new_categories: set) -> str:
+    lines = []
+    for category in sorted(allowed_new_categories):
+        required = schema.get_required_fields(category)
+        field_descs = []
+        for f in required:
+            if f["type"] == "enum":
+                field_descs.append(f"{f['name']} (필수, 다음 중 하나: {', '.join(f.get('options') or [])})")
+            else:
+                field_descs.append(f"{f['name']} (필수)")
+        lines.append(f"- {category}: " + (", ".join(field_descs) if field_descs else "(필수 필드 없음)"))
+    return "\n".join(lines)
+
+
+def _resolve_new_entities(data: dict, allowed_new_categories: set) -> tuple:
+    """Parses data["new_entities"], mints each a real entity_id immediately
+    (archivist.generate_id — collision-checked against storage AND every id
+    minted earlier in this same call, exactly how timeline ids within one
+    batch already avoid colliding), and returns (list[DraftEntity], {tag:
+    real_id}) so callers can rewrite every event's entity references from
+    Creator's own placeholder tags to real ids in one pass. Silently drops
+    any entity whose category isn't in allowed_new_categories or is missing
+    a name — Creator ignoring its own instructions shouldn't crash the
+    draft, just lose that one entity."""
+    entities = []
+    tag_to_id = {}
+    existing_ids = set()
+    for raw in (data.get("new_entities") or [])[:MAX_NEW_ENTITIES]:
+        tag = raw.get("tag")
+        category = raw.get("category")
+        fields = dict(raw.get("fields") or {})
+        if not tag or category not in allowed_new_categories or not fields.get("name"):
+            continue
+        entity_id = archivist.generate_id(category, fields["name"], existing_ids)
+        existing_ids.add(entity_id)
+        tag_to_id[tag] = entity_id
+        entities.append(DraftEntity(entity_id=entity_id, category=category, fields=fields))
+    return entities, tag_to_id
+
+
+def _remap_tags(value, tag_to_id: dict):
+    if isinstance(value, list):
+        return [tag_to_id.get(v, v) for v in value]
+    if isinstance(value, str):
+        return tag_to_id.get(value, value)
+    return value
 
 
 def _entity_context_block(resolved_entities: dict) -> str:
@@ -226,6 +353,7 @@ def compose_narrative(
     upper: int,
     feedback: str | None = None,
     supplement: str | None = None,
+    allowed_new_categories: set | None = None,
 ) -> NarrativeDraft:
     """Draft a multi-event narrative for `request_text`, entirely within
     [lower, upper] (inclusive, both concrete ints — the caller resolves any
@@ -239,19 +367,46 @@ def compose_narrative(
     `feedback`, when given, is Inspector's rejection reason(s) from a prior
     failed attempt in the same retry loop. `supplement` is an optional
     user-provided instruction from a [Redo] request — added on top of the
-    original request, never replacing it."""
+    original request, never replacing it. `allowed_new_categories` (Phase 10
+    patch 22, B — off/empty by default) is the set of categories the user's
+    per-category checkboxes allow Creator to *invent new* entities in;
+    existing entities of the backdrop categories (location/artifact/
+    faction) are always referenceable regardless of this set — it only
+    gates fabricating brand-new ones."""
+    allowed_new_categories = allowed_new_categories or set()
     entity_list = "\n".join(f'- "{tag}" -> {entity_id}' for tag, entity_id in resolved_entities.items())
     entity_context = _entity_context_block(resolved_entities)
     valid_ids = ", ".join(resolved_entities.values())
 
-    # Existing locations only (Phase 10 patch 22 follow-up) — Creator can
-    # name a location for a point event, same as a person narrating a scene
-    # naturally would ("은빛도시에서 얘기를 나누었다"), but only ever an
-    # *existing* one (never invents a new place, same "tagged/existing
-    # entities only" rule as everything else Creator touches).
-    location_options = "\n".join(
-        f'- {e["id"]} ("{e.get("name") or e["id"]}")' for e in storage.list_entities("location")
-    ) or "(등록된 장소 없음)"
+    # Existing location/artifact/faction entities (Phase 10 patch 22, B) —
+    # Creator can naturally reference any of these in a scene ("은빛도시에서
+    # 얘기를 나누었다", "여명검을 휘둘렀다"), same as a person narrating a
+    # scene would, without needing them tagged. character/race are
+    # deliberately excluded here — see _BACKDROP_CATEGORIES.
+    backdrop_block = _backdrop_entities_block(lower, upper)
+
+    new_entity_block = ""
+    if allowed_new_categories:
+        category_block = _new_entity_category_block(allowed_new_categories)
+        new_entity_block = (
+            "\n\n=== 새로운 조연 엔티티 생성 ===\n"
+            f"다음 카테고리는 필요하다면 새로 지어내도 좋다 (최대 {MAX_NEW_ENTITIES}개까지, "
+            "이야기에 실제로 필요한 만큼만 — 억지로 채우지 마라):\n"
+            f"{category_block}\n"
+            "각 새 엔티티는 new_entities 배열에 {\"tag\": 이 응답 안에서만 쓰는 임시 식별자, "
+            "\"category\": 카테고리, \"fields\": {필수 필드 전부 + 선택적으로 notes 등}}로 "
+            "채워라. events 안에서 그 엔티티를 참조할 때는(involved_entities, "
+            "duration_effect.entity/target, location) 실제 entity_id 대신 이 tag 문자열을 "
+            "그대로 써라 — 실제 id는 이후 자동으로 부여된다. 이름 없는 '여러 사람', '누군가' "
+            "같은 뭉뚱그린 표현 대신, 서사에 필요하다면 구체적인 조연으로 만들어라(예: '카라반 "
+            "마스터 밥'). 이 목록에 없는 카테고리로는 절대 새 엔티티를 만들지 마라."
+        )
+        allowed_note = (
+            f" (단, {', '.join(sorted(allowed_new_categories))}은(는) 아래 안내에 따라 새로 "
+            "지어내도 좋다)"
+        )
+    else:
+        allowed_note = ""
 
     all_status_effects = schema.load_status_effects()
     status_effect_options = "\n".join(
@@ -292,7 +447,7 @@ def compose_narrative(
     prompt = (
         "너는 판타지 세계관 로어 데이터베이스의 이야기 기획자(Creator)다. 사용자의 짧은 요청을 "
         "받아, 그 요청을 표현하는 하나 이상의 사건 기록(timeline record) 초안을 스스로 작성하라. "
-        "절대 새로운 엔티티를 지어내지 말고, 아래 확정된 엔티티만 사용하라.\n\n"
+        f"아래 확정된 엔티티만 사용하고, 새로운 인물/종족은 절대 지어내지 마라{allowed_note}.\n\n"
         f"확정된 엔티티:\n{entity_list}\n\n"
         f"엔티티 정보:\n{entity_context}\n\n"
         f"사용 가능한 entity_id: {valid_ids}\n\n"
@@ -309,37 +464,70 @@ def compose_narrative(
         "마지막에 duration 이벤트를 추가하라 — 여러 사건을 만든다고 항상 duration도 만들어야 "
         "하는 건 아니다. 예: 사랑 이야기라면 마지막에 연인 관계 duration을 추가하는 게 자연스럽지만, "
         "단순히 바보짓을 하는 이야기라면 point만으로 완결되고 duration은 불필요하다.\n\n"
+        "duration_effect.action은 다음 중 하나다 — 특히 clear는 이미 열려 있는 기존 상태/관계를 "
+        "실제로 종료시키는 유일한 방법이다: 새로 별개의 duration 레코드를 만들어 '해제되었다'고 "
+        "서술하는 것만으로는 기존 기록이 실제로 닫히지 않는다 (그 기존 레코드의 end_year는 "
+        "그대로 비어있는 채 남는다). 위 '엔티티의 관련 기록'에 이미 열려 있는(end_year 없는) "
+        "상태/관계가 있고, 이번 서사가 그것을 끝내는 내용이라면 반드시 clear를 써서 그 기존 "
+        "기록 자체를 닫아라:\n"
+        "  - set: 새로운 상태/관계가 이 사건에서 시작됨. start_year 필요, end_year는 없음.\n"
+        "  - clear: 이미 열려 있는 기존 상태/관계가 이 사건에서 끝남 (예: 추방이 풀렸다, 수감에서 "
+        "석방됐다, 단체가 해체됐다). entity와 predicate는 반드시 그 기존 열린 기록과 정확히 "
+        "동일해야 그 기록을 찾아 닫을 수 있다. end_year(이 사건의 연도) 필수, start_year는 "
+        "없어도 된다.\n"
+        "  - set_closed: 이미 시작과 끝이 모두 지난 상태/관계를 한 번에 서술함 (예: '2050년부터 "
+        "2060년까지 수감되어 있었다'). start_year와 end_year 둘 다 필요.\n\n"
+        "events 배열의 순서 = 검증 순서다: 각 사건은 자신보다 앞에 나온 사건들만 이미 벌어진 "
+        "일로 보고 검증되고, 뒤에 나온 사건은 아직 모른다. 따라서 clear로 기존 상태/관계를 "
+        "끝내야만 말이 되는 사건이 있다면, 그 clear를 반드시 그 사건보다 앞에 배치하라 — "
+        "예를 들어 '추방이 풀린 뒤 다시 방문했다'는 [추방 해제(clear)] -> [방문(point)] 순서여야 "
+        "한다. clear를 맨 뒤에 두면 앞선 사건들이 여전히 열려 있는 기존 상태와 모순되는 것으로 "
+        "판단된다.\n\n"
         "duration_effect.predicate: 대상이 없는 개인 상태라면 아래 등록된 id 중 하나를 써라:\n"
         f"{status_effect_options}\n"
         "대상이 있는 관계라면, 이미 등록된 관계형 predicate 목록을 먼저 확인하고 상황에 맞는 게 "
         f"있으면 재사용하라:\n{relational_predicate_options}\n"
         "마땅히 재사용할 것이 없을 때만 새로운 predicate 이름을 자유롭게 만들어라 — 새 이름은 "
-        "이후 별도 확인 절차를 거치므로 지어내는 것 자체는 괜찮다.\n\n"
+        "이후 별도 확인 절차를 거치므로 지어내는 것 자체는 괜찮다. clear일 때는 새 이름을 짓지 "
+        "말고 반드시 닫으려는 기존 기록의 predicate를 그대로 재사용하라.\n\n"
         "각 point 사건에는 notes(실제 있었던 일을 서술하는 완결된 한국어 문장 — 이 문장은 이후 "
         "세계관 규칙/설정 모순 검증에 그대로 쓰이므로, 검증 가능하도록 구체적으로 서술하라)와 "
         "involved_entities(관련된 entity_id 목록)를 채워라. 각 duration 사건에는 notes와 "
-        "duration_effect(entity, predicate, target, action='set', start_year)를 채워라.\n\n"
-        "=== 장소(location) ===\n"
-        "point 사건이 특정 장소에서 벌어진다면, 아래 등록된 장소 목록에 그 장소가 있는 경우에만 "
-        "location에 해당 entity_id를 채워라 — 절대 새로운 장소를 지어내지 마라. 등록된 목록에 "
-        "맞는 장소가 없거나 장소가 서사에 특별히 중요하지 않다면 location은 null로 둬라. 억지로 "
-        "아무 장소나 골라 넣지 마라.\n"
-        f"등록된 장소 목록:\n{location_options}\n"
+        "duration_effect(entity, predicate, target, action, start_year, end_year — action에 "
+        "따라 위 설명대로 채움)를 채워라.\n\n"
+        "=== 기존 장소/사물/세력 활용 ===\n"
+        "point 사건이 특정 장소에서 벌어진다면, 아래 목록에 있는 경우에만 location에 해당 "
+        "entity_id를 채워라(장소가 아니면 location은 항상 null). 아래 목록의 사물/세력도 "
+        "서사에 자연스럽게 등장시켜도 좋다 — 등장시켰다면 involved_entities에 반드시 포함시켜라 "
+        "(포함시키지 않으면 그 엔티티 쪽에서는 이 사건이 전혀 기록되지 않는다). 목록에 없는 "
+        "장소/사물/세력은 지어내지 마라 — 서사에 특별히 필요하지 않다면 억지로 아무거나 "
+        "골라 넣지 마라.\n"
+        f"등록된 장소/사물/세력 목록:\n{backdrop_block}\n"
+        f"{new_entity_block}"
         f"{single_year_instruction}{feedback_block}{supplement_block}\n\n"
         "아래 JSON 형식으로만 답하라 (다른 설명 금지):\n"
         "{\n"
         '  "natural_event_count": 정수 (이 서사에 이상적인 사건 개수, 제약 없이 판단),\n'
+        '  "new_entities": [\n'
+        "    {\n"
+        '      "tag": "이 응답 안에서만 쓰는 임시 식별자",\n'
+        '      "category": "허용된 카테고리 중 하나",\n'
+        '      "fields": {"name": "...", "필수 필드": "...", "notes": "선택, 짧은 설명"}\n'
+        "    }\n"
+        "  ] (새 엔티티 생성이 허용되지 않았다면 항상 빈 배열),\n"
         '  "events": [\n'
         "    {\n"
         '      "event_type": "point 또는 duration",\n'
         '      "notes": "한국어 문장",\n'
-        '      "involved_entities": ["entity_id", ...],\n'
+        '      "involved_entities": ["entity_id 또는 new_entities의 tag", ...],\n'
         '      "year": "point일 때만, 정수 또는 null",\n'
         '      "location": "point일 때만, 등록된 장소의 entity_id 또는 null",\n'
         '      "duration_effect": {\n'
-        '        "entity": "entity_id", "predicate": "...", "target": "entity_id 또는 null", '
-        '"action": "set",\n'
-        '        "start_year": "정수", "end_year": "이미 종료된 경우만, 정수 또는 null"\n'
+        '        "entity": "entity_id 또는 tag", "predicate": "...", '
+        '"target": "entity_id, tag, 또는 null", '
+        '"action": "set, clear, set_closed 중 하나",\n'
+        '        "start_year": "set/set_closed일 때 필수, clear일 때는 null 가능, 정수 또는 null",\n'
+        '        "end_year": "clear/set_closed일 때 필수, set일 때는 null, 정수 또는 null"\n'
         "      } 또는 null (duration일 때만)\n"
         "    }\n"
         "  ]\n"
@@ -349,10 +537,17 @@ def compose_narrative(
     raw = _invoke_llm(prompt)
     data = _extract_json(raw)
 
+    new_entities, tag_to_id = _resolve_new_entities(data, allowed_new_categories)
+
     events = []
     for e in (data.get("events") or [])[:MAX_EVENTS]:
-        involved = list(e.get("involved_entities") or [])
-        location = e.get("location")
+        involved = [_remap_tags(v, tag_to_id) for v in (e.get("involved_entities") or [])]
+        location = _remap_tags(e.get("location"), tag_to_id)
+        duration_effect = e.get("duration_effect")
+        if duration_effect:
+            duration_effect = dict(duration_effect)
+            duration_effect["entity"] = _remap_tags(duration_effect.get("entity"), tag_to_id)
+            duration_effect["target"] = _remap_tags(duration_effect.get("target"), tag_to_id)
         # Folded into involved_entities here, not left as a bare field —
         # this is what actually gets the location a reciprocal event_ids
         # pointer (via archivist's own pointer registration), the same way
@@ -361,9 +556,16 @@ def compose_narrative(
         # clickable link on the event's own page (Phase 10 patch 20 renders
         # any set reference field), but the location's *own* page would
         # never show this event back — a one-directional link, not the
-        # real thing.
+        # real thing. New entities referenced only via duration_effect (not
+        # involved_entities) get the same treatment for the same reason.
         if location and location not in involved:
             involved.append(location)
+        for extra in (
+            (duration_effect or {}).get("entity"),
+            (duration_effect or {}).get("target"),
+        ):
+            if extra and extra not in involved:
+                involved.append(extra)
         events.append(
             DraftEvent(
                 event_type=e.get("event_type", "point"),
@@ -371,12 +573,13 @@ def compose_narrative(
                 involved_entities=involved,
                 year=e.get("year"),
                 location=location,
-                duration_effect=e.get("duration_effect"),
+                duration_effect=duration_effect,
             )
         )
 
     return NarrativeDraft(
         events=events,
+        new_entities=new_entities,
         natural_event_count=data.get("natural_event_count") or len(events),
     )
 
@@ -428,7 +631,10 @@ def inspect_draft(resolved_entities: dict, draft: NarrativeDraft) -> InspectionR
 
     for i, event in enumerate(draft.events):
         involved = _event_involved(event, entity_ids)
-        event_year = event.year if event.event_type == "point" else event.start_year
+        # A "clear" action may carry only end_year (start_year belongs to
+        # the *existing* record being closed, not this one) — fall back to
+        # it so the check still has a year to annotate/gate against.
+        event_year = event.year if event.event_type == "point" else (event.start_year or event.end_year)
         candidate_years = [y for y in (event.year, event.start_year, event.end_year) if y is not None]
 
         for entity_id in involved:
@@ -485,6 +691,7 @@ def run_reflection_loop(
     upper: int,
     supplement: str | None = None,
     first_draft: NarrativeDraft | None = None,
+    allowed_new_categories: set | None = None,
 ) -> ReflectionResult:
     """Never silently gives up (spec section E): on exhausting MAX_RETRIES,
     returns the *last* attempted draft alongside why it was rejected, so the
@@ -512,7 +719,13 @@ def run_reflection_loop(
 
     for attempt in range(start_attempt, MAX_RETRIES + 1):
         draft = compose_narrative(
-            resolved_entities, request_text, lower, upper, feedback=feedback, supplement=supplement
+            resolved_entities,
+            request_text,
+            lower,
+            upper,
+            feedback=feedback,
+            supplement=supplement,
+            allowed_new_categories=allowed_new_categories,
         )
         result = inspect_draft(resolved_entities, draft)
         if result.approved:

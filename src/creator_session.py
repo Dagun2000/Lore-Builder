@@ -48,6 +48,12 @@ class CreatorSession:
     resolved_entities: dict = field(default_factory=dict)
     lower: int | None = None
     upper: int | None = None
+    # Categories the user's per-category checkboxes allow Creator to invent
+    # *new* entities in (Phase 10 patch 22, B) — empty by default, matching
+    # the checkboxes' own off-by-default. Existing location/artifact/faction
+    # entities remain referenceable regardless of this set; it only gates
+    # fabricating brand-new ones.
+    allowed_new_categories: set = field(default_factory=set)
     draft: object = None  # creator.NarrativeDraft, once composed
     attempts: int = 0
     pending_decision: "PendingDecision | None" = None
@@ -146,8 +152,38 @@ def _save_draft(resolved_entities: dict, draft) -> list:
     own same-call pointer-merging (existing_ids/pointer_targets) to span
     across separate calls, which it was never built to do."""
     applied = []
+
+    # New entities (Phase 10 patch 22, B) are created first, with their own
+    # real fields (name, notes, any required enum) — storage.save_entity is
+    # a genuine upsert, so the event loop below would eventually create a
+    # bare row via pointer registration alone if this step were skipped,
+    # but that row would only ever get event_ids populated, never the
+    # entity's actual name/notes/etc.
+    for new_entity in draft.new_entities:
+        storage.save_entity(new_entity.category, new_entity.entity_id, new_entity.fields)
+        if new_entity.fields.get("notes"):
+            storage.save_to_chroma(
+                new_entity.entity_id, new_entity.fields["notes"], {"category": new_entity.category}
+            )
+        applied.append(
+            archivist.ChangeItem(
+                action="create",
+                category=new_entity.category,
+                entity_id=new_entity.entity_id,
+                fields=new_entity.fields,
+                body=new_entity.fields.get("notes"),
+                reason="Creator가 새로 생성한 조연 엔티티",
+            )
+        )
+
     for event in draft.events:
-        year = event.year if event.event_type == "point" else event.start_year
+        # A "clear" duration_effect may carry only end_year (start_year
+        # belongs to the existing record being closed, not this one) — the
+        # fallback matters here specifically because archivist's own clear
+        # branch falls back to parsed_input.years[0] when duration_effect
+        # itself has no end_year, and a bare None there would silently
+        # no-op the clear instead of actually closing the record.
+        year = event.year if event.event_type == "point" else (event.start_year or event.end_year)
         parsed_input = parser.ParsedInput(years=[year], tags=[], raw_text=event.notes)
         inferred_event = inference.InferredEvent(
             event_type=event.event_type,
@@ -191,6 +227,13 @@ def _draft_event_payload(draft) -> list:
     ]
 
 
+def _draft_entity_payload(draft) -> list:
+    return [
+        {"entity_id": e.entity_id, "category": e.category, "fields": e.fields}
+        for e in draft.new_entities
+    ]
+
+
 def _apply_year_edits(draft, edits: dict) -> None:
     """`edits`: {event_index (int or str): {"year": .. } or {"start_year": .., "end_year": ..}}.
 
@@ -225,7 +268,11 @@ def _apply_year_edits(draft, edits: dict) -> None:
                 if old_start is not None and new_start is not None and str(old_start) in event.notes:
                     event.notes = event.notes.replace(str(old_start), str(new_start))
             if "end_year" in values:
-                event.duration_effect["end_year"] = values["end_year"]
+                old_end = event.duration_effect.get("end_year")
+                new_end = values["end_year"]
+                event.duration_effect["end_year"] = new_end
+                if old_end is not None and new_end is not None and str(old_end) in event.notes:
+                    event.notes = event.notes.replace(str(old_end), str(new_end))
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +283,12 @@ def _draft_and_review_gen(session: CreatorSession, resolved_entities: dict, lowe
     first_draft = None
     if lower == upper:
         first_draft = creator.compose_narrative(
-            resolved_entities, session.user_input, lower, upper, supplement=supplement
+            resolved_entities,
+            session.user_input,
+            lower,
+            upper,
+            supplement=supplement,
+            allowed_new_categories=session.allowed_new_categories,
         )
         if first_draft.natural_event_count > 1:
             choice = yield PendingDecision(
@@ -264,7 +316,13 @@ def _draft_and_review_gen(session: CreatorSession, resolved_entities: dict, lowe
             # "compress" (or any other truthy response): keep first_draft, continue as-is
 
     reflection = creator.run_reflection_loop(
-        resolved_entities, session.user_input, lower, upper, supplement=supplement, first_draft=first_draft
+        resolved_entities,
+        session.user_input,
+        lower,
+        upper,
+        supplement=supplement,
+        first_draft=first_draft,
+        allowed_new_categories=session.allowed_new_categories,
     )
     session.attempts = reflection.attempts
 
@@ -277,6 +335,7 @@ def _draft_and_review_gen(session: CreatorSession, resolved_entities: dict, lowe
                 "attempts": reflection.attempts,
                 "reason": reflection.last_reason,
                 "events": _draft_event_payload(reflection.draft),
+                "new_entities": _draft_entity_payload(reflection.draft),
             },
             {},
         )
@@ -297,7 +356,12 @@ def _draft_and_review_gen(session: CreatorSession, resolved_entities: dict, lowe
 def _final_review_gen(session: CreatorSession, resolved_entities: dict, lower: int, upper: int):
     while True:
         response = yield PendingDecision(
-            "creator_final_review", {"events": _draft_event_payload(session.draft)}, {}
+            "creator_final_review",
+            {
+                "events": _draft_event_payload(session.draft),
+                "new_entities": _draft_entity_payload(session.draft),
+            },
+            {},
         )
         action = (response or {}).get("action") if isinstance(response, dict) else None
 
@@ -403,8 +467,11 @@ def _advance(session: CreatorSession, send_value=None, is_start: bool = False) -
     return session
 
 
-def start_session(user_input: str) -> CreatorSession:
-    session = CreatorSession(session_id=str(uuid.uuid4()), user_input=user_input)
+def start_session(user_input: str, allowed_new_categories: set | None = None) -> CreatorSession:
+    session = CreatorSession(
+        session_id=str(uuid.uuid4()), user_input=user_input,
+        allowed_new_categories=set(allowed_new_categories or ()),
+    )
     session._generator = _creator_generator(session)
     _SESSIONS[session.session_id] = session
     return _advance(session, is_start=True)
