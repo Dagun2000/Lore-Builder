@@ -14,7 +14,7 @@ the goal is being able to repeat every CLI test scenario through the GUI.
 
 import streamlit as st
 
-from src import deletion, field_update, flags, hard_check, pipeline_session, schema, storage
+from src import creator_session, deletion, field_update, flags, hard_check, pipeline_session, schema, storage
 
 _NAME_BEARING_CATEGORIES = ("character", "location", "faction", "artifact", "race")
 
@@ -27,6 +27,8 @@ def _init_session_state() -> None:
     defaults = {
         "chat_history": [],
         "session": None,
+        "creator_history": [],
+        "creator_session": None,
         "selected_entity": None,
         "_last_mode": None,
         "detail_field_name": None,
@@ -378,6 +380,19 @@ _DECISION_RENDERERS = {
 def render_chat_mode() -> None:
     st.header("채팅")
 
+    # Explicit mode toggle, not pattern detection (Phase 10 patch 22, A) —
+    # a selectbox directly above the chat input is the closest native
+    # Streamlit proxy to "inside the input box" (chat_input can't embed
+    # another widget literally inside it). The two modes branch into
+    # completely separate entry functions below; there is no shared
+    # guessing logic anywhere for which one an input "looks like".
+    is_creator = st.selectbox(
+        "모드", ["일반 채팅", "Creator"], key="chat_mode_toggle", label_visibility="collapsed"
+    ) == "Creator"
+    if is_creator:
+        render_creator_mode()
+        return
+
     text = st.chat_input("사건을 입력하세요")
     if text:
         st.session_state.chat_history.append({"role": "user", "content": text})
@@ -402,6 +417,222 @@ def render_chat_mode() -> None:
             st.write(description)
         st.session_state.chat_history.append({"role": "assistant", "content": description})
         st.session_state.session = None
+
+
+# ---------------------------------------------------------------------------
+# Creator mode — renders creator_session's decision types (Phase 10 patch 22)
+# ---------------------------------------------------------------------------
+
+def _resume_creator(session, response) -> None:
+    try:
+        st.session_state.creator_session = creator_session.resume_session(session.session_id, response)
+    except ValueError:
+        # Same double-click guard as _resume above.
+        pass
+    st.rerun()
+
+
+def _render_creator_entity_candidates(session, decision, key_prefix) -> None:
+    """Same decision_type/payload shape as pipeline_session's own tag
+    disambiguation, reused for GUI consistency — Creator always sends
+    allow_create=False, so there's no "신규 작성" branch to render here."""
+    payload = decision.payload
+    st.write(f'"{payload["tag"]}" 후보를 선택하세요:')
+    for i, candidate_id in enumerate(payload["candidates"]):
+        if st.button(candidate_id, key=f"{key_prefix}_cand_{i}"):
+            _resume_creator(session, candidate_id)
+
+
+def _render_creator_year_confirm(session, decision, key_prefix) -> None:
+    payload = decision.payload
+    lower, upper = payload["lower"], payload["upper"]
+    st.write("이야기에 사용할 연도 범위를 확인해주세요.")
+    if lower is None and upper is None:
+        st.caption("관련 엔티티들의 존재 기간 정보가 없어 범위를 추정할 수 없습니다. 직접 입력해주세요.")
+    elif upper is None:
+        st.caption(f"관련 엔티티들이 함께 존재하는 기간: {lower}년 이후 (현재까지 진행 중)")
+    else:
+        st.caption(f"관련 엔티티들이 함께 존재하는 기간: {lower}년 ~ {upper}년")
+
+    default_lower = lower if lower is not None else 0
+    default_upper = upper if upper is not None else default_lower + 50
+    new_lower = st.number_input("시작 연도", value=default_lower, step=1, key=f"{key_prefix}_lower")
+    new_upper = st.number_input("종료 연도", value=default_upper, step=1, key=f"{key_prefix}_upper")
+
+    col1, col2 = st.columns(2)
+    if col1.button("확인", key=f"{key_prefix}_confirm"):
+        _resume_creator(session, {"action": "confirm", "lower": int(new_lower), "upper": int(new_upper)})
+    if col2.button("취소", key=f"{key_prefix}_cancel"):
+        _resume_creator(session, {"action": "cancel"})
+
+
+def _render_creator_count_mismatch(session, decision, key_prefix) -> None:
+    payload = decision.payload
+    st.write(
+        f"이 이야기는 {payload['natural_event_count']}개의 사건으로 구성하는 게 자연스러워 보입니다.\n\n"
+        f"연도 범위를 다시 입력해주시겠어요, 아니면 지정하신 {payload['year']}년 근처로 압축해서 만들까요?"
+    )
+    col1, col2, col3 = st.columns(3)
+    if col1.button("범위로 다시 입력", key=f"{key_prefix}_widen_toggle"):
+        st.session_state[f"{key_prefix}_widening"] = True
+        st.rerun()
+    if col2.button(f"{payload['year']}년 근처로 압축", key=f"{key_prefix}_compress"):
+        _resume_creator(session, {"action": "compress"})
+    if col3.button("취소", key=f"{key_prefix}_cancel"):
+        _resume_creator(session, {"action": "cancel"})
+
+    if st.session_state.get(f"{key_prefix}_widening"):
+        new_lower = st.number_input("시작 연도", value=payload["year"], step=1, key=f"{key_prefix}_lower")
+        new_upper = st.number_input("종료 연도", value=payload["year"] + 10, step=1, key=f"{key_prefix}_upper")
+        if st.button("이 범위로 진행", key=f"{key_prefix}_widen_confirm"):
+            _resume_creator(session, {"action": "widen", "lower": int(new_lower), "upper": int(new_upper)})
+
+
+def _render_creator_new_relational_predicate(session, decision, key_prefix) -> None:
+    """Same decision_type/payload shape as pipeline_session's patch-16
+    registry gate, reused for GUI consistency."""
+    payload = decision.payload
+    st.write(
+        f'"{payload["predicate"]}"라는 새로운 관계를 상태/관계 목록에 추가할까요? '
+        f'({payload.get("entity_id")} → {payload.get("target_id")})'
+    )
+    if payload.get("reason"):
+        st.caption(payload["reason"])
+
+    col1, col2, col3 = st.columns(3)
+    if col1.button("저장", key=f"{key_prefix}_save"):
+        _resume_creator(session, {"action": "save"})
+    if col2.button("수정", key=f"{key_prefix}_edit_toggle"):
+        st.session_state[f"{key_prefix}_editing"] = True
+        st.rerun()
+    if col3.button("취소", key=f"{key_prefix}_cancel"):
+        _resume_creator(session, {"action": "cancel"})
+
+    if st.session_state.get(f"{key_prefix}_editing"):
+        new_name = st.text_input("새 이름", value=payload["predicate"], key=f"{key_prefix}_name")
+        if st.button("이 이름으로 저장", key=f"{key_prefix}_edit_confirm"):
+            _resume_creator(session, {"action": "edit", "name": new_name})
+
+
+def _render_creator_exhausted(session, decision, key_prefix) -> None:
+    payload = decision.payload
+    st.warning(f"{payload['attempts']}회 시도했지만 검증을 통과하지 못했습니다.")
+    st.caption(f"마지막 반려 사유: {payload['reason']}")
+    st.write("마지막으로 시도된 초안:")
+    for e in payload["events"]:
+        year = e["year"] if e["event_type"] == "point" else e["start_year"]
+        st.write(f"- [{e['event_type']}, {year}년] {e['notes']}")
+    col1, col2 = st.columns(2)
+    if col1.button("그래도 검토하기", key=f"{key_prefix}_keep"):
+        _resume_creator(session, {"action": "keep_anyway"})
+    if col2.button("포기", key=f"{key_prefix}_discard"):
+        _resume_creator(session, {"action": "discard"})
+
+
+def _render_creator_edit_conflict(session, decision, key_prefix) -> None:
+    payload = decision.payload
+    st.warning(f"수정한 연도가 검증에 실패했습니다: {payload['reason']}")
+    col1, col2 = st.columns(2)
+    if col1.button("그래도 저장", key=f"{key_prefix}_accept"):
+        _resume_creator(session, {"action": "save_anyway"})
+    if col2.button("돌아가기", key=f"{key_prefix}_back"):
+        _resume_creator(session, {"action": "back"})
+
+
+def _render_creator_final_review(session, decision, key_prefix) -> None:
+    payload = decision.payload
+    st.write("**최종 검토** — 사건별로 연도를 확인/수정할 수 있습니다.")
+    year_widgets = {}
+    for e in payload["events"]:
+        idx = e["index"]
+        st.write(f"{idx + 1}. [{e['event_type']}] {e['notes']}")
+        if e["event_type"] == "point":
+            new_year = st.number_input("연도", value=e["year"], step=1, key=f"{key_prefix}_year_{idx}")
+            year_widgets[idx] = ("year", e["year"], int(new_year))
+        else:
+            new_start = st.number_input(
+                "시작 연도", value=e["start_year"], step=1, key=f"{key_prefix}_start_{idx}"
+            )
+            year_widgets[idx] = ("start_year", e["start_year"], int(new_start))
+        st.divider()
+
+    col1, col2, col3 = st.columns(3)
+    if col1.button("저장", key=f"{key_prefix}_save"):
+        edits = {}
+        for idx, (field_name, original, new_value) in year_widgets.items():
+            if new_value != original:
+                edits[str(idx)] = {field_name: new_value}
+        _resume_creator(session, {"action": "save", "year_edits": edits})
+    if col2.button("취소", key=f"{key_prefix}_cancel"):
+        _resume_creator(session, {"action": "cancel"})
+    if col3.button("Redo", key=f"{key_prefix}_redo_toggle"):
+        st.session_state[f"{key_prefix}_redoing"] = True
+        st.rerun()
+
+    if st.session_state.get(f"{key_prefix}_redoing"):
+        supplement = st.text_input(
+            "[Redo] — 다시 만들 때 참고할 내용이 있나요? (선택, 비워둬도 됨)",
+            placeholder='예: "좀 더 잔인하게 해줘", "이벤트를 더 짧게 압축해줘"',
+            key=f"{key_prefix}_supplement",
+        )
+        if st.button("재시도", key=f"{key_prefix}_redo_confirm"):
+            _resume_creator(session, {"action": "redo", "supplement": supplement})
+
+
+_CREATOR_DECISION_RENDERERS = {
+    "entity_candidates": _render_creator_entity_candidates,
+    "creator_year_confirm": _render_creator_year_confirm,
+    "creator_count_mismatch": _render_creator_count_mismatch,
+    "new_relational_predicate": _render_creator_new_relational_predicate,
+    "creator_exhausted": _render_creator_exhausted,
+    "creator_final_review": _render_creator_final_review,
+    "creator_edit_conflict": _render_creator_edit_conflict,
+}
+
+
+def _describe_creator_result(result: dict) -> str:
+    status = result.get("status")
+    if status == "error":
+        return f"입력 오류: {result['message']}"
+    if status == "rejected":
+        return result.get("message", "요청을 처리할 수 없습니다.")
+    if status == "cancelled":
+        return result.get("message") or "취소되었습니다."
+    if status == "saved":
+        applied = result.get("applied", [])
+        creates = [c.entity_id for c in applied if c.action == "create" and c.category == "timeline"]
+        return f"저장 완료: {len(creates)}개의 사건이 생성되었습니다. ({', '.join(creates)})"
+    return "완료되었습니다."
+
+
+def render_creator_mode() -> None:
+    text = st.chat_input(
+        "[ ]로 태그된 엔티티와 만들고 싶은 이야기를 입력하세요 "
+        "(예: [쟝]과 [미라]가 원수가 되는 이야기, 2100년에)"
+    )
+    if text:
+        st.session_state.creator_history.append({"role": "user", "content": text})
+        st.session_state.creator_session = creator_session.start_session(text)
+
+    for msg in st.session_state.creator_history:
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
+
+    session = st.session_state.creator_session
+    if session is None:
+        return
+
+    if session.pending_decision is not None:
+        decision = session.pending_decision
+        key_prefix = f"{session.session_id}_{id(decision)}"
+        with st.chat_message("assistant"):
+            _CREATOR_DECISION_RENDERERS[decision.decision_type](session, decision, key_prefix)
+    else:
+        description = _describe_creator_result(session.result)
+        with st.chat_message("assistant"):
+            st.write(description)
+        st.session_state.creator_history.append({"role": "assistant", "content": description})
+        st.session_state.creator_session = None
 
 
 # ---------------------------------------------------------------------------

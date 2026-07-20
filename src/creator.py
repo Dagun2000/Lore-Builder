@@ -19,6 +19,32 @@ from . import config, hard_check, rag_check, schema, storage
 
 MAX_EVENTS = 5
 
+_TAG_PATTERN = re.compile(r"\[([^\[\]]+)\]")
+_YEAR_RANGE_PATTERN = re.compile(r"(\d+)\s*년?\s*(?:부터|[~\-])\s*(\d+)\s*년(?:\s*까지)?")
+_YEAR_PATTERN = re.compile(r"(\d+)\s*년")
+
+
+def parse_year_hint(text: str) -> tuple:
+    """(lower, upper) if `text` explicitly states a year or year range
+    ("2010년", "2000~2010년"), else (None, None) meaning no explicit year
+    was given at all. A bare single year returns (y, y) — the caller
+    decides what a single value means (compose_narrative's is_single_year
+    branch handles the actual constraint; creator_session decides whether
+    to run the count-mismatch check). Bracket contents are excluded from
+    the scan, same reasoning as parser.parse_input: a tag like "[100년
+    전쟁]" isn't a year mention. Two or more loose year mentions with no
+    explicit range separator are ambiguous and treated as no hint at all,
+    falling through to the auto-computed-window flow."""
+    stripped = _TAG_PATTERN.sub(" ", text)
+    range_match = _YEAR_RANGE_PATTERN.search(stripped)
+    if range_match:
+        a, b = int(range_match.group(1)), int(range_match.group(2))
+        return (a, b) if a <= b else (b, a)
+    years = sorted({int(m) for m in _YEAR_PATTERN.findall(stripped)})
+    if len(years) == 1:
+        return years[0], years[0]
+    return None, None
+
 
 @dataclass
 class YearWindow:
@@ -29,13 +55,46 @@ class YearWindow:
     per_entity: dict = field(default_factory=dict)  # entity_id -> (lower, upper)
 
 
+def _pairwise_connection_floor(entity_ids: list) -> tuple:
+    """Earliest start_year among duration records connecting any two of the
+    given entities to *each other* — e.g. a "knows"/"enemies_with" record
+    between them is proof they'd had at least one point of contact by then,
+    which floors any new joint scene involving both. Without this, the
+    suggested window only looked at each entity's own existence range and
+    could offer years technically within both characters' lifespans but
+    still before they'd ever met (observed in practice: two characters on
+    record as first meeting in 2079 still got offered a range starting in
+    the 2010s-2030s, purely from birth years, and every attempt in that
+    span failed Inspector). Returns (year, reason) or (None, None) if no
+    such cross-entity connection exists on record."""
+    entity_id_set = set(entity_ids)
+    earliest = None
+    earliest_pair = None
+    for entity_id in entity_ids:
+        for record in storage.get_duration_records(entity_id):
+            other = record.get("target") if record.get("entity") == entity_id else record.get("entity")
+            if other not in entity_id_set or other == entity_id:
+                continue
+            start = record.get("start_year")
+            if start is not None and (earliest is None or start < earliest):
+                earliest = start
+                earliest_pair = (entity_id, other, record.get("predicate"))
+    if earliest is None:
+        return None, None
+    a, b, predicate = earliest_pair
+    reason = f"{a}와(과) {b}의 관계('{predicate}')가 {earliest}년부터 시작된 것으로 기록되어 있습니다."
+    return earliest, reason
+
+
 def compute_year_window(entity_ids: list) -> YearWindow:
     """Intersects every entity's own existence range (hard_check.
     get_existence_range) into one window a Creator-generated story must fit
-    within. `possible=False` means the entities' existence ranges never
-    overlap at all (e.g. one died before another was born) — the caller
-    should reject the request before ever invoking Creator, not burn a
-    retry loop on something that can never pass Inspector."""
+    within, then further raises the lower bound to account for any
+    recorded relationship *between* the given entities (see
+    _pairwise_connection_floor). `possible=False` means the resulting
+    window is empty — the caller should reject the request before ever
+    invoking Creator, not burn a retry loop on something that can never
+    pass Inspector."""
     per_entity = {}
     for entity_id in entity_ids:
         category = schema.category_from_id(entity_id)
@@ -61,6 +120,16 @@ def compute_year_window(entity_ids: list) -> YearWindow:
         )
         return YearWindow(lower=lower, upper=upper, possible=False, reason=reason, per_entity=per_entity)
 
+    connection_floor, connection_reason = _pairwise_connection_floor(entity_ids)
+    if connection_floor is not None and (lower is None or connection_floor > lower):
+        if upper is not None and connection_floor > upper:
+            return YearWindow(
+                lower=connection_floor, upper=upper, possible=False,
+                reason=f"{connection_reason} 하지만 관련 엔티티의 존재 기간은 {upper}년까지입니다.",
+                per_entity=per_entity,
+            )
+        lower = connection_floor
+
     return YearWindow(lower=lower, upper=upper, possible=True, per_entity=per_entity)
 
 
@@ -73,10 +142,21 @@ class DraftEvent:
     event_type: str  # "point" | "duration"
     notes: str
     involved_entities: list = field(default_factory=list)
-    year: int | None = None
-    start_year: int | None = None
-    end_year: int | None = None
+    year: int | None = None  # point events only
+    location: str | None = None  # point events only — an existing location's entity_id
+    # duration events: start_year/end_year live inside duration_effect
+    # (mirrors inference.InferredEvent's exact convention), not as separate
+    # top-level fields — archivist._build_duration_diff reads them from
+    # duration_effect directly, so this isn't just cosmetic consistency.
     duration_effect: dict | None = None
+
+    @property
+    def start_year(self) -> int | None:
+        return (self.duration_effect or {}).get("start_year")
+
+    @property
+    def end_year(self) -> int | None:
+        return (self.duration_effect or {}).get("end_year")
 
 
 @dataclass
@@ -164,6 +244,15 @@ def compose_narrative(
     entity_context = _entity_context_block(resolved_entities)
     valid_ids = ", ".join(resolved_entities.values())
 
+    # Existing locations only (Phase 10 patch 22 follow-up) — Creator can
+    # name a location for a point event, same as a person narrating a scene
+    # naturally would ("은빛도시에서 얘기를 나누었다"), but only ever an
+    # *existing* one (never invents a new place, same "tagged/existing
+    # entities only" rule as everything else Creator touches).
+    location_options = "\n".join(
+        f'- {e["id"]} ("{e.get("name") or e["id"]}")' for e in storage.list_entities("location")
+    ) or "(등록된 장소 없음)"
+
     all_status_effects = schema.load_status_effects()
     status_effect_options = "\n".join(
         f"- {s['id']} ({s['label']})" for s in all_status_effects if s.get("type", "individual") == "individual"
@@ -229,7 +318,13 @@ def compose_narrative(
         "각 point 사건에는 notes(실제 있었던 일을 서술하는 완결된 한국어 문장 — 이 문장은 이후 "
         "세계관 규칙/설정 모순 검증에 그대로 쓰이므로, 검증 가능하도록 구체적으로 서술하라)와 "
         "involved_entities(관련된 entity_id 목록)를 채워라. 각 duration 사건에는 notes와 "
-        "duration_effect(entity, predicate, target, action='set', start_year)를 채워라."
+        "duration_effect(entity, predicate, target, action='set', start_year)를 채워라.\n\n"
+        "=== 장소(location) ===\n"
+        "point 사건이 특정 장소에서 벌어진다면, 아래 등록된 장소 목록에 그 장소가 있는 경우에만 "
+        "location에 해당 entity_id를 채워라 — 절대 새로운 장소를 지어내지 마라. 등록된 목록에 "
+        "맞는 장소가 없거나 장소가 서사에 특별히 중요하지 않다면 location은 null로 둬라. 억지로 "
+        "아무 장소나 골라 넣지 마라.\n"
+        f"등록된 장소 목록:\n{location_options}\n"
         f"{single_year_instruction}{feedback_block}{supplement_block}\n\n"
         "아래 JSON 형식으로만 답하라 (다른 설명 금지):\n"
         "{\n"
@@ -240,10 +335,12 @@ def compose_narrative(
         '      "notes": "한국어 문장",\n'
         '      "involved_entities": ["entity_id", ...],\n'
         '      "year": "point일 때만, 정수 또는 null",\n'
-        '      "start_year": "duration일 때만, 정수 또는 null",\n'
-        '      "end_year": "duration이고 이미 종료된 경우만, 정수 또는 null",\n'
-        '      "duration_effect": {"entity": "entity_id", "predicate": "...", '
-        '"target": "entity_id 또는 null", "action": "set"} 또는 null\n'
+        '      "location": "point일 때만, 등록된 장소의 entity_id 또는 null",\n'
+        '      "duration_effect": {\n'
+        '        "entity": "entity_id", "predicate": "...", "target": "entity_id 또는 null", '
+        '"action": "set",\n'
+        '        "start_year": "정수", "end_year": "이미 종료된 경우만, 정수 또는 null"\n'
+        "      } 또는 null (duration일 때만)\n"
         "    }\n"
         "  ]\n"
         "}\n"
@@ -252,18 +349,31 @@ def compose_narrative(
     raw = _invoke_llm(prompt)
     data = _extract_json(raw)
 
-    events = [
-        DraftEvent(
-            event_type=e.get("event_type", "point"),
-            notes=e.get("notes", ""),
-            involved_entities=e.get("involved_entities") or [],
-            year=e.get("year"),
-            start_year=e.get("start_year"),
-            end_year=e.get("end_year"),
-            duration_effect=e.get("duration_effect"),
+    events = []
+    for e in (data.get("events") or [])[:MAX_EVENTS]:
+        involved = list(e.get("involved_entities") or [])
+        location = e.get("location")
+        # Folded into involved_entities here, not left as a bare field —
+        # this is what actually gets the location a reciprocal event_ids
+        # pointer (via archivist's own pointer registration), the same way
+        # a location tagged directly in the normal chat pipeline gets one.
+        # Without this, the location field alone would still render as a
+        # clickable link on the event's own page (Phase 10 patch 20 renders
+        # any set reference field), but the location's *own* page would
+        # never show this event back — a one-directional link, not the
+        # real thing.
+        if location and location not in involved:
+            involved.append(location)
+        events.append(
+            DraftEvent(
+                event_type=e.get("event_type", "point"),
+                notes=e.get("notes", ""),
+                involved_entities=involved,
+                year=e.get("year"),
+                location=location,
+                duration_effect=e.get("duration_effect"),
+            )
         )
-        for e in (data.get("events") or [])[:MAX_EVENTS]
-    ]
 
     return NarrativeDraft(
         events=events,
@@ -298,7 +408,19 @@ def _event_involved(event: DraftEvent, fallback: list) -> list:
 def inspect_draft(resolved_entities: dict, draft: NarrativeDraft) -> InspectionResult:
     """Stops at the first rejected event — Creator retries the whole batch
     (spec: whole-batch retry, not per-event patching), so nothing is gained
-    by continuing to check events past the first failure."""
+    by continuing to check events past the first failure.
+
+    An empty draft.events is a rejection, not a trivial pass (the for loop
+    below would otherwise never execute and fall through to approved=True)
+    — observed in practice: composing against a year constraint that
+    conflicts with an established relational fact (e.g. asking for a 2030s
+    scene between two characters already on record as not meeting until
+    2079) can make the LLM give up and return zero events for an attempt
+    instead of erroring, which used to silently "succeed" with nothing to
+    save and no failure reason ever shown."""
+    if not draft.events:
+        return InspectionResult(approved=False, reason="이번 시도에서 생성된 사건이 없습니다.")
+
     entity_ids = list(resolved_entities.values())
     hard_rule_docs = rag_check._get_hard_rule_texts()
     approved_context_lines = []  # this draft's own already-approved events' notes
@@ -339,3 +461,62 @@ def inspect_draft(resolved_entities: dict, draft: NarrativeDraft) -> InspectionR
                 approved_years.setdefault(entity_id, []).extend(candidate_years)
 
     return InspectionResult(approved=True)
+
+
+# ---------------------------------------------------------------------------
+# Reflection loop — Creator drafts, Inspector checks, repeat on rejection
+# ---------------------------------------------------------------------------
+
+MAX_RETRIES = 4  # spec: "3~5회"
+
+
+@dataclass
+class ReflectionResult:
+    draft: NarrativeDraft
+    approved: bool
+    attempts: int
+    last_reason: str | None = None  # set only when approved=False — the final attempt's rejection reason
+
+
+def run_reflection_loop(
+    resolved_entities: dict,
+    request_text: str,
+    lower: int,
+    upper: int,
+    supplement: str | None = None,
+    first_draft: NarrativeDraft | None = None,
+) -> ReflectionResult:
+    """Never silently gives up (spec section E): on exhausting MAX_RETRIES,
+    returns the *last* attempted draft alongside why it was rejected, so the
+    caller can show both to the user for a manual decision rather than just
+    reporting failure. `supplement` (an optional [Redo] instruction) stays
+    constant across every retry within this one call; `feedback` (Inspector's
+    rejection reason) changes attempt to attempt, feeding forward so Creator
+    doesn't blindly repeat the same mistake.
+
+    `first_draft`, when given, is used as attempt 1 instead of composing a
+    fresh one — lets a caller that already had to call compose_narrative
+    once for its own reasons (creator_session's single-year count-mismatch
+    check draws its own first draft to inspect natural_event_count before
+    the user has even confirmed a final year window) feed it in here rather
+    than paying for a redundant duplicate composition."""
+    feedback = None
+    draft = first_draft
+    start_attempt = 1
+    if draft is not None:
+        result = inspect_draft(resolved_entities, draft)
+        if result.approved:
+            return ReflectionResult(draft=draft, approved=True, attempts=1)
+        feedback = result.reason
+        start_attempt = 2
+
+    for attempt in range(start_attempt, MAX_RETRIES + 1):
+        draft = compose_narrative(
+            resolved_entities, request_text, lower, upper, feedback=feedback, supplement=supplement
+        )
+        result = inspect_draft(resolved_entities, draft)
+        if result.approved:
+            return ReflectionResult(draft=draft, approved=True, attempts=attempt)
+        feedback = result.reason
+
+    return ReflectionResult(draft=draft, approved=False, attempts=MAX_RETRIES, last_reason=feedback)

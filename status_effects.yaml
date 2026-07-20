@@ -23,3 +23,6 @@ status_effects:
 - id: friends_with
   label: friends_with
   type: relational
+- id: in_love_with
+  label: in_love_with
+  type: relational
