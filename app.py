@@ -2,11 +2,15 @@
 
 Runs in-process, calling pipeline_session.py/field_update.py/flags.py
 directly — no separate API server. Sidebar has a permanent search box at
-the top (not a mode — it's live no matter which mode is active) and 3
-mode tabs below it (chat / dictionary / visualization-placeholder).
-"review pending" is deliberately NOT a mode either — it's just what the
-entity-detail screen becomes once you pick a field to edit, reached from
-either the search box or the dictionary.
+the top (not a mode — it's live no matter which mode is active) and 2
+mode tabs below it (chat / dictionary). "review pending" is deliberately
+NOT a mode either — it's just what the entity-detail screen becomes once
+you pick a field to edit, reached from either the search box or the
+dictionary. Visualization (Phase 10 patch 17) isn't a top-level mode
+either — it's a tab on the entity-detail screen itself (see
+render_entity_detail), since it's always about one specific entity; the
+sidebar used to carry a "시각화" mode placeholder for this before the
+design landed here, since removed.
 
 Widget polish (badges, styling) is explicitly out of scope for this phase —
 the goal is being able to repeat every CLI test scenario through the GUI.
@@ -14,7 +18,18 @@ the goal is being able to repeat every CLI test scenario through the GUI.
 
 import streamlit as st
 
-from src import creator, creator_session, deletion, field_update, flags, hard_check, pipeline_session, schema, storage
+from src import (
+    creator,
+    creator_session,
+    deletion,
+    field_update,
+    flags,
+    hard_check,
+    pipeline_session,
+    schema,
+    storage,
+    visualization,
+)
 
 _NAME_BEARING_CATEGORIES = ("character", "location", "faction", "artifact", "race")
 
@@ -1338,6 +1353,250 @@ def _render_timeline_detail(entity_id: str, entity: dict) -> None:
         st.rerun()
 
 
+def _render_entity_timeline(entity_id: str) -> None:
+    """Phase 10 patch 17, B — this entity's own events on a year axis.
+    Point events render as markers on a shared "사건" row; duration events
+    each get their own horizontal bar row. No LLM call anywhere — labels
+    are either a plain truncation of `notes` (point) or `predicate` + the
+    target's name (duration), both already computed by
+    visualization.build_timeline.
+
+    Point events deliberately stay on ONE shared lane rather than each
+    getting its own row the way duration events do — a duration event is
+    inherently rare (one per status/relationship an entity ever has), but
+    a busy character could easily rack up dozens of point events, and a
+    row-per-event layout would make the whole chart's height scale with
+    that count. The tradeoff: point events show detail on hover only, not
+    as permanent floating text (which would collide the moment two events
+    landed close together on the year axis, or land on top of each other
+    entirely when they share the exact same year — see the jitter
+    below)."""
+    import plotly.graph_objects as go
+
+    entries = visualization.build_timeline(entity_id)
+    if not entries:
+        st.write("이 엔티티와 관련된 사건이 없습니다.")
+        return
+
+    point_entries = [e for e in entries if e.kind == "point"]
+    duration_entries = [e for e in entries if e.kind == "duration"]
+
+    # Phase 10 patch 17 follow-up: an "ongoing" (end_year=None) bar needs
+    # something to visually stop at. entity_id's own lifecycle_end
+    # (death/destroyed/disbanded — whichever role its category defines)
+    # is a real, known fact when set, so a bar gets capped there and shown
+    # as genuinely ended. Otherwise there's no known endpoint, so it falls
+    # back to a "cutoff" guessed from entity_id's own chronologically last
+    # event (its year if that event is a point; its start_year + a small
+    # buffer if a duration — see resolve_timeline_reference's docstring
+    # for why the buffer exists) and stays visually distinct: lighter
+    # color, "(진행중)" label, dashed reference line.
+    ref = visualization.resolve_timeline_reference(entity_id)
+    open_bound = ref["end"] or ref["cutoff"]
+
+    fig = go.Figure()
+    for e in duration_entries:
+        bound_year = open_bound.year if open_bound else e.start_year
+        start = e.start_year if e.start_year is not None else bound_year
+        if e.end_year is not None:
+            end = e.end_year
+            suffix = ""
+            color = "#2a78d6"
+            span_label = f"{start}~{end}"
+        elif ref["end"] is not None:
+            end = max(bound_year, start)
+            suffix = " (대상 소멸로 종료)"
+            color = "#2a78d6"
+            span_label = f"{start}~{bound_year} (대상 소멸로 종료)"
+        else:
+            end = max(bound_year, start)
+            suffix = " (진행중)"
+            color = "#9ec5f4"
+            span_label = f"{start}~ (마지막 기록: {bound_year}년)"
+        fig.add_trace(
+            go.Bar(
+                x=[max(end - start, 0.5)],
+                y=[e.label + suffix],
+                base=[start],
+                orientation="h",
+                customdata=[e.event_id],
+                hovertext=[span_label],
+                hoverinfo="text",
+                marker_color=color,
+                showlegend=False,
+            )
+        )
+
+    # Populated below when there are point events; kept accessible after
+    # the chart is drawn so a click on a multi-event year's marker (no
+    # single unambiguous target — see below) can still offer a picker
+    # instead of just doing nothing.
+    by_year: dict = {}
+    if point_entries:
+        # Jittering apart same-year markers (an earlier version of this
+        # fix) turned out to shrink to invisibility on any chart spanning
+        # more than a few years — a 0.15-year nudge is imperceptible next
+        # to a 50+ year axis. Grouping by year instead sidesteps the whole
+        # "how big a nudge is enough" problem: one marker per distinct
+        # year, and every event that year lists in the hover popup. A
+        # single-event year still click-navigates straight to that event;
+        # a multi-event year has no single unambiguous click target, so a
+        # click there offers a picker instead (see below the chart).
+        for e in point_entries:
+            by_year.setdefault(e.year, []).append(e)
+
+        years_sorted = sorted(by_year)
+        hover_texts = []
+        customdata = []
+        for year in years_sorted:
+            group = by_year[year]
+            if len(group) == 1:
+                hover_texts.append(f"{year}년, 사건: {group[0].label}")
+                customdata.append(group[0].event_id)
+            else:
+                lines = "<br>".join(f"• {e.label}" for e in group)
+                hover_texts.append(f"{year}년, {len(group)}개 사건:<br>{lines}")
+                customdata.append(None)
+
+        fig.add_trace(
+            go.Scatter(
+                x=years_sorted,
+                y=["사건"] * len(years_sorted),
+                mode="markers",
+                customdata=customdata,
+                hovertext=hover_texts,
+                hoverinfo="text",
+                marker=dict(size=12, color="#E45756"),
+                showlegend=False,
+            )
+        )
+
+    for line, dash in ((ref["start"], "dot"), (ref["end"], "dot"), (ref["cutoff"], "dash")):
+        if line is not None:
+            fig.add_vline(
+                x=line.year, line_dash=dash, line_color="#898781",
+                annotation_text=f"{line.label}: {line.year}", annotation_position="top",
+                annotation_textangle=0,
+            )
+
+    fig.update_layout(
+        xaxis_title="연도",
+        height=max(300, 70 * (len(duration_entries) + 1)),
+        margin=dict(l=10, r=10, t=50, b=10),
+    )
+
+    event = st.plotly_chart(fig, on_select="rerun", key=f"timeline_chart_{entity_id}")
+    points = (event.get("selection") or {}).get("points") or []
+    # customdata was set here as a flat 1D array (one scalar per point), so
+    # plotly reports it back as that scalar directly — NOT wrapped in an
+    # extra list the way Streamlit's own docs example shows (that example
+    # used px.scatter's hover_data mechanism, which produces a 2D
+    # customdata array; ours doesn't). Indexing with an extra `[0]` here
+    # was silently slicing the first *character* off the event_id string
+    # instead of reading it — confirmed from the exact reported symptom
+    # ("Unknown entity_id: e", the first letter of "event_...").
+    if points:
+        clicked_id = points[0].get("customdata")
+        if clicked_id:
+            _navigate_to_entity(clicked_id)
+            st.rerun()
+        elif points[0].get("x") in by_year:
+            # A multi-event year's marker carries no customdata (no single
+            # unambiguous click target) — offer a picker instead of just
+            # silently doing nothing, using the clicked point's own x
+            # (the year) to look the group back up.
+            group = by_year[points[0]["x"]]
+            st.info(f"{points[0]['x']}년에 사건이 {len(group)}개 있습니다. 이동할 사건을 선택하세요:")
+            for ge in group:
+                if st.button(ge.label, key=f"timeline_pick_{entity_id}_{ge.event_id}"):
+                    _navigate_to_entity(ge.event_id)
+                    st.rerun()
+
+
+def _render_relationship_graph(entity_id: str) -> None:
+    """Phase 10 patch 17, C — hub-and-spoke: entity_id at the center, every
+    1-hop neighbor (any category, point or duration events alike) around
+    it, edge thickness = shared event count. Category checkboxes and the
+    minimum-connections slider are both computed from live data, never a
+    hardcoded list/range."""
+    from streamlit_agraph import Config, Edge, Node, agraph
+
+    category = schema.category_from_id(entity_id)
+    center_entity = storage.get_entity(category, entity_id) if category else None
+    weights = visualization.compute_neighbor_weights(entity_id)
+
+    if not weights:
+        st.write("1-hop으로 연결된 엔티티가 없습니다.")
+        return
+
+    st.write("**카테고리 필터**")
+    categories = visualization.filterable_categories()
+    selected_categories = set()
+    if categories:
+        cols = st.columns(len(categories))
+        for col, cat in zip(cols, categories):
+            with col:
+                if st.checkbox(cat, value=True, key=f"graph_cat_{entity_id}_{cat}"):
+                    selected_categories.add(cat)
+
+    # st.slider requires min_value < max_value — every neighbor sharing
+    # exactly 1 event (a common case, not just the empty-weights one
+    # already handled above) would otherwise make max_weight == 1 and
+    # crash the widget. A 1~1 range has nothing meaningful to filter
+    # anyway, so just skip the slider and show everyone in that case.
+    max_weight = max(weights.values())
+    if max_weight > 1:
+        min_weight = st.slider(
+            "최소 연결 횟수", min_value=1, max_value=max_weight, value=1,
+            key=f"graph_minweight_{entity_id}",
+        )
+    else:
+        min_weight = 1
+
+    nodes_data, edges_data = visualization.build_relationship_graph(
+        entity_id, weights, selected_categories, min_weight
+    )
+    if not nodes_data:
+        st.write("조건에 맞는 연결된 엔티티가 없습니다.")
+        return
+
+    # Legend first (dataviz skill non-negotiable: identity is never
+    # color-alone once there's more than one series) — only for the
+    # categories actually present among the nodes shown, not every
+    # filterable category, so it doesn't advertise colors nothing on
+    # screen is using.
+    shown_categories = sorted({n.category for n in nodes_data})
+    if shown_categories:
+        legend_cols = st.columns(len(shown_categories))
+        for col, cat in zip(legend_cols, shown_categories):
+            with col:
+                st.markdown(
+                    f'<span style="color:{visualization.category_color(cat)}">●</span> {cat}',
+                    unsafe_allow_html=True,
+                )
+
+    edge_weights = [e.weight for e in edges_data]
+    min_w, max_w = min(edge_weights), max(edge_weights)
+
+    agraph_nodes = [
+        Node(id=entity_id, label=(center_entity or {}).get("name") or entity_id, size=30, color=visualization.CENTER_NODE_COLOR)
+    ]
+    agraph_nodes += [
+        Node(id=n.entity_id, label=n.label, size=20, color=visualization.category_color(n.category))
+        for n in nodes_data
+    ]
+    agraph_edges = [
+        Edge(source=entity_id, target=e.other_id, width=e.weight, color=visualization.edge_color(e.weight, min_w, max_w))
+        for e in edges_data
+    ]
+
+    config = Config(width=700, height=500, directed=False, physics=True)
+    clicked = agraph(nodes=agraph_nodes, edges=agraph_edges, config=config)
+    if clicked and clicked != entity_id:
+        _navigate_to_entity(clicked)
+        st.rerun()
+
+
 def render_entity_detail(entity_id: str) -> None:
     category = schema.category_from_id(entity_id)
     if category is None:
@@ -1353,38 +1612,51 @@ def render_entity_detail(entity_id: str) -> None:
         _navigate_to_entity(None)
         st.rerun()
 
-    st.subheader("현재 필드 값")
-    _render_entity_fields(category, entity_id, entity)
-    if category == "timeline":
-        _render_timeline_participants(entity_id, entity)
-
     if category == "timeline":
         # Phase 10 patch 8, section 4: an event has no fields that can be
         # patched one at a time without invalidating its own content-derived
         # id, so it gets a dedicated form instead of the generic field
-        # editor — see _render_timeline_detail.
+        # editor — see _render_timeline_detail. Phase 10 patch 17's
+        # visualization tabs are deliberately not offered here either — a
+        # raw timeline record has no timeline/relationship graph of its
+        # own to show.
+        st.subheader("현재 필드 값")
+        _render_entity_fields(category, entity_id, entity)
+        _render_timeline_participants(entity_id, entity)
         _render_timeline_detail(entity_id, entity)
         return
 
-    _render_field_editor_section(category, entity_id, entity)
+    info_tab, viz_tab = st.tabs(["정보/수정", "시각화"])
 
-    # The relevance search only runs once a field edit is actually
-    # attempted this session (detail_searched, set by "필드 값 검토" below),
-    # and never for lifecycle fields (birth_year/death_year/founded_year/
-    # ...) — the only thing "related" could mean there is "does this year
-    # conflict with a recorded event", and hard_check already answers that
-    # directly above (see _render_field_editor_section's success/warning
-    # messages).
-    selected_field_def = next(
-        (f for f in schema.get_fields(category) if f["name"] == st.session_state.get("detail_field_name")),
-        None,
-    )
-    is_lifecycle_field = bool(selected_field_def and selected_field_def.get("role") in ("lifecycle_start", "lifecycle_end"))
-    if st.session_state.get("detail_searched"):
-        if category in _EVENT_POINTER_CATEGORIES and not is_lifecycle_field:
-            _render_relevant_context_section(entity_id, st.session_state.detail_field_name)
-        _render_save_section(category, entity_id, st.session_state.detail_field_name)
-    _render_delete_entity_section(category, entity_id)
+    with info_tab:
+        st.subheader("현재 필드 값")
+        _render_entity_fields(category, entity_id, entity)
+        _render_field_editor_section(category, entity_id, entity)
+
+        # The relevance search only runs once a field edit is actually
+        # attempted this session (detail_searched, set by "필드 값 검토" below),
+        # and never for lifecycle fields (birth_year/death_year/founded_year/
+        # ...) — the only thing "related" could mean there is "does this year
+        # conflict with a recorded event", and hard_check already answers that
+        # directly above (see _render_field_editor_section's success/warning
+        # messages).
+        selected_field_def = next(
+            (f for f in schema.get_fields(category) if f["name"] == st.session_state.get("detail_field_name")),
+            None,
+        )
+        is_lifecycle_field = bool(selected_field_def and selected_field_def.get("role") in ("lifecycle_start", "lifecycle_end"))
+        if st.session_state.get("detail_searched"):
+            if category in _EVENT_POINTER_CATEGORIES and not is_lifecycle_field:
+                _render_relevant_context_section(entity_id, st.session_state.detail_field_name)
+            _render_save_section(category, entity_id, st.session_state.detail_field_name)
+        _render_delete_entity_section(category, entity_id)
+
+    with viz_tab:
+        timeline_tab, graph_tab = st.tabs(["타임라인", "관계도"])
+        with timeline_tab:
+            _render_entity_timeline(entity_id)
+        with graph_tab:
+            _render_relationship_graph(entity_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1399,7 +1671,7 @@ def main() -> None:
     render_sidebar_search()
     st.sidebar.divider()
 
-    mode = st.sidebar.radio("모드", ["채팅", "딕셔너리", "시각화"], key="mode")
+    mode = st.sidebar.radio("모드", ["채팅", "딕셔너리"], key="mode")
 
     # Phase 9 patch E: clicking a different mode tab must win over "an
     # entity detail screen happens to be open" — previously the
@@ -1409,9 +1681,6 @@ def main() -> None:
     if st.session_state._last_mode is not None and st.session_state._last_mode != mode:
         _navigate_to_entity(None)
     st.session_state._last_mode = mode
-
-    if mode == "시각화":
-        st.sidebar.caption("곧 추가 예정")
 
     with st.sidebar.expander("🚩 플래그 확인"):
         deduped = flags.list_flags_deduped()
