@@ -92,6 +92,13 @@ def entity_field_summary(record: dict) -> str | None:
     return ", ".join(parts) if parts else None
 
 
+def _status_effect_notes_map() -> dict:
+    """{predicate_id: notes} for every status_effects.yaml entry that has
+    notes set — not cached beyond schema.load_status_effects' own
+    lru_cache, so an edit via the GUI editor is picked up immediately."""
+    return {s["id"]: s["notes"] for s in schema.load_status_effects() if s.get("notes")}
+
+
 def _duration_activity_annotation(related_event: dict, event_year: int) -> str | None:
     """[활성] tag for a duration-type related event (has a start_year) that
     is actually in effect at event_year, computed the same way
@@ -129,7 +136,10 @@ def _duration_activity_annotation(related_event: dict, event_year: int) -> str |
 
 
 def _entity_context_lines(
-    entities: list, event_year: int | None = None, extra_context: list | None = None
+    entities: list,
+    event_year: int | None = None,
+    extra_context: list | None = None,
+    closed_predicates: set | None = None,
 ) -> list:
     """Each involved entity's own stored fields + notes (including any
     self-declared exception) + its race's notes + its related events' notes
@@ -165,7 +175,19 @@ def _entity_context_lines(
     multi-event draft sequentially before anything is saved, and needs
     event 3's check to see events 1-2 as real context even though they're
     still only in memory. Every existing caller passes nothing, so this is
-    additive-only for the normal chat pipeline."""
+    additive-only for the normal chat pipeline.
+
+    `closed_predicates` (Phase 10 patch 22 follow-up): a set of
+    (entity_id, predicate) pairs that a caller knows have already been
+    closed by an earlier-in-this-same-batch event, even though storage
+    itself still shows the record open (nothing's saved yet). Without this,
+    a still-open DB record kept getting its confirmatory [활성] tag even
+    after Creator had already drafted the `clear` event ending it earlier in
+    the same draft — the stale tag directly told the LLM the status was
+    still active, outweighing the plain-text mention of the release sitting
+    in extra_context. Matching records are annotated as if not active
+    (patch 21's plain, untagged treatment), not dropped — the fact itself
+    still carries full weight, just without the misleading confirmatory tag."""
     lines = []
     for entity_id in entities:
         category = schema.category_from_id(entity_id)
@@ -193,11 +215,21 @@ def _entity_context_lines(
         for related_event in storage.get_events_for_entity(entity_id):
             if not related_event.get("notes"):
                 continue
-            annotation = _duration_activity_annotation(related_event, event_year)
+            already_closed = closed_predicates and (entity_id, related_event.get("predicate")) in closed_predicates
+            annotation = None if already_closed else _duration_activity_annotation(related_event, event_year)
             prefix = f"{annotation} " if annotation else ""
-            lines.append(
-                f"{entity_id}의 관련 기록({related_event['id']}): {prefix}{related_event['notes']}"
-            )
+            line = f"{entity_id}의 관련 기록({related_event['id']}): {prefix}{related_event['notes']}"
+            # Phase 10 patch 22 follow-up 3: the predicate's own registered
+            # meaning (status_effects.yaml's notes field), when set, is
+            # appended here regardless of active/inactive — this is what
+            # actually told the LLM "using an item requires currently
+            # owning it" or "imprisoned means physically unable to leave",
+            # instead of the LLM inferring real-world implications from a
+            # bare predicate name alone.
+            predicate_notes = _status_effect_notes_map().get(related_event.get("predicate"))
+            if predicate_notes:
+                line += f" (predicate '{related_event.get('predicate')}'의 의미: {predicate_notes})"
+            lines.append(line)
     if extra_context:
         lines.extend(extra_context)
     return lines
@@ -213,9 +245,10 @@ def check_rule_violation(
     context_docs: list,
     event_year: int | None = None,
     extra_context: list | None = None,
+    closed_predicates: set | None = None,
 ) -> Judgment | None:
     docs = "\n".join(f"- {d}" for d in context_docs) if context_docs else "(관련 규칙 없음)"
-    context_lines = _entity_context_lines(entities, event_year, extra_context)
+    context_lines = _entity_context_lines(entities, event_year, extra_context, closed_predicates)
     entity_context = (
         "\n".join(f"- {line}" for line in context_lines)
         if context_lines else "(참고할 엔티티 정보 없음)"
@@ -278,8 +311,9 @@ def check_notes_conflict(
     raw_text: str,
     event_year: int | None = None,
     extra_context: list | None = None,
+    closed_predicates: set | None = None,
 ) -> Judgment | None:
-    notes_lines = _entity_context_lines(entities, event_year, extra_context)
+    notes_lines = _entity_context_lines(entities, event_year, extra_context, closed_predicates)
 
     if not notes_lines:
         print("[rag_check] check_notes_conflict: 참고할 notes가 없어 LLM 호출 생략")
@@ -315,13 +349,20 @@ def check_notes_conflict(
         "가정하지 마라 — 규칙 서술에 구간별 추가 단서(예: \"5개부터 강하다\", \"10개는 "
         "지금까지 나타난 적이 없다\")가 있으면 그 단서를 우선 근거로 상대적 위치를 판단하고, "
         "그런 단서가 전혀 없을 때만 범위 내 위치로 대략 판단하라\n"
-        "3. 단, 다음의 경우 모순으로 보지 않는다:\n"
+        "3. 사건 문장이 특정 인물이 특정 사물(무기, 도구, 유물 등)을 사용·착용·소지·휘두르는 "
+        "등 실제로 다루는 행동을 서술한다면, 이는 그 시점에 그 사물을 소유·보유하고 있다는 "
+        "주장으로 간주하라. 관련 기록에 그 사물의 소유 관계 기록(예: '...년부터 ...년까지 "
+        "소유했으나 ...년에 잃어버렸다/도난당했다/파괴되었다')이 있는데 사건 문장의 시점이 그 "
+        "소유가 유효한 기간 밖이라면, 이는 명시적 소속·자격 주장(예: '탈퇴한 단체 소속으로서 "
+        "행동')과 동일한 무게의 모순 후보로 판단하라 — 소유 사실이 행동 동사에만 암시되어 "
+        "있다는 이유로 가볍게 넘기지 마라.\n"
+        "4. 단, 다음의 경우 모순으로 보지 않는다:\n"
         "   - 행동이 발생한 위치나 맥락이 그 규정이 적용되는 범위 밖임이 문장에 명시된 경우 "
         "(예: \"결투를 하는 투기장\"이어도, 행동이 \"관중석\"처럼 위험 구역과 구분되는 별도 "
         "장소에서 일어났다면 자연스러운 상황일 수 있다)\n"
         "   - 행동 자체가 이미 그 위험/제약을 인지하고 대응하는 것으로 보이는 경우(전투, "
         "경계, 도주 등)\n"
-        "4. 판단이 애매하면 확신 없이도 모순 가능성이 있다고 보고하라 — 최종 판단은 사람이 "
+        "5. 판단이 애매하면 확신 없이도 모순 가능성이 있다고 보고하라 — 최종 판단은 사람이 "
         "확인 후 결정하므로, 놓치는 것보다 애매하게라도 짚어주는 쪽이 낫다. 확신이 없다는 걸 "
         "reason에 명시해도 된다.\n\n"
         f"기존 설정:\n{notes_block}\n\n"
@@ -353,6 +394,7 @@ def check_rule_and_notes(
     context_docs: list,
     event_year: int | None = None,
     extra_context: list | None = None,
+    closed_predicates: set | None = None,
 ) -> list:
     """check_rule_violation and check_notes_conflict, combined into one LLM
     call instead of two. Both checks were independently pulling the exact
@@ -367,7 +409,7 @@ def check_rule_and_notes(
     (tests call them directly) — only the integration points below switch to
     this."""
     docs = "\n".join(f"- {d}" for d in context_docs) if context_docs else "(관련 규칙 없음)"
-    context_lines = _entity_context_lines(entities, event_year, extra_context)
+    context_lines = _entity_context_lines(entities, event_year, extra_context, closed_predicates)
     entity_context = (
         "\n".join(f"- {line}" for line in context_lines)
         if context_lines else "(참고할 엔티티 정보 없음)"
@@ -425,13 +467,20 @@ def check_rule_and_notes(
         "   - 상관관계 규칙이 있는 경우, 한 엔티티가 스스로 주장하는 속성(평판, 능력 등)이 그 "
         "상관관계상 자신이 가진 다른 값과 앞뒤가 맞는지도 확인하라(위 판단 1과 동일한 상대적 "
         "위치 기준을 적용하라).\n"
-        "3. 단, 다음의 경우 모순으로 보지 않는다:\n"
+        "3. 사건 문장이 특정 인물이 특정 사물(무기, 도구, 유물 등)을 사용·착용·소지·휘두르는 "
+        "등 실제로 다루는 행동을 서술한다면, 이는 그 시점에 그 사물을 소유·보유하고 있다는 "
+        "주장으로 간주하라. 관련 기록에 그 사물의 소유 관계 기록(예: '...년부터 ...년까지 "
+        "소유했으나 ...년에 잃어버렸다/도난당했다/파괴되었다')이 있는데 사건 문장의 시점이 그 "
+        "소유가 유효한 기간 밖이라면, 이는 명시적 소속·자격 주장(예: '탈퇴한 단체 소속으로서 "
+        "행동')과 동일한 무게의 모순 후보로 판단하라 — 소유 사실이 행동 동사에만 암시되어 "
+        "있다는 이유로 가볍게 넘기지 마라.\n"
+        "4. 단, 다음의 경우 모순으로 보지 않는다:\n"
         "   - 행동이 발생한 위치나 맥락이 그 규정이 적용되는 범위 밖임이 문장에 명시된 경우 "
         "(예: \"결투를 하는 투기장\"이어도, 행동이 \"관중석\"처럼 위험 구역과 구분되는 별도 "
         "장소에서 일어났다면 자연스러운 상황일 수 있다)\n"
         "   - 행동 자체가 이미 그 위험/제약을 인지하고 대응하는 것으로 보이는 경우(전투, "
         "경계, 도주 등)\n"
-        "4. 판단이 애매하면 확신 없이도 모순 가능성이 있다고 보고하라 — 최종 판단은 사람이 "
+        "5. 판단이 애매하면 확신 없이도 모순 가능성이 있다고 보고하라 — 최종 판단은 사람이 "
         "확인 후 결정하므로, 놓치는 것보다 애매하게라도 짚어주는 쪽이 낫다. 확신이 없다는 걸 "
         "reason에 명시해도 된다.\n\n"
         "아래 JSON 형식으로만 답하라 (다른 텍스트 금지):\n"
@@ -491,9 +540,12 @@ def check_status_consistency(entity_id: str, raw_text: str, event_year: int) -> 
     if not active_effects:
         return None
 
-    label_map = {s["id"]: s["label"] for s in schema.load_status_effects()}
+    all_effects = schema.load_status_effects()
+    label_map = {s["id"]: s["label"] for s in all_effects}
+    notes_map = {s["id"]: s.get("notes") for s in all_effects}
     effect_lines = "\n".join(
-        f"- {eid} ({label_map.get(eid, eid)})" for eid in active_effects
+        f"- {eid} ({label_map.get(eid, eid)})" + (f": {notes_map[eid]}" if notes_map.get(eid) else "")
+        for eid in active_effects
     )
 
     prompt = (
@@ -501,6 +553,9 @@ def check_status_consistency(entity_id: str, raw_text: str, event_year: int) -> 
         "상태(reversible status)가 걸려 있다.\n\n"
         f"엔티티: {entity_id}\n"
         f"현재 상태:\n{effect_lines}\n\n"
+        "각 상태 옆에 붙은 설명(있는 경우)은 그 상태가 실제로 무엇을 허용하고 무엇을 "
+        "금지하는지 정의한 것이다 — 이름만으로 짐작하지 말고, 설명이 있다면 그 내용을 "
+        "판단의 직접적인 근거로 삼아라. 설명이 없는 상태는 이름과 상식적인 함의로 판단하라.\n\n"
         f"새로 입력된 사건 문장: {raw_text}\n\n"
         "이 문장이 위 상태와 어떤 관계인지 다음 중 정확히 하나의 JSON으로 답하라:\n"
         '1) 자연스럽게 양립: {"result": "ok"}\n'

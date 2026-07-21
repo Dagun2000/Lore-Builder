@@ -40,7 +40,7 @@ def _save_status_effects(effects: list) -> None:
 _STATUS_EFFECT_TYPES = ("individual", "relational")
 
 
-def add_status_effect(effect_id: str, label: str, type_: str = "individual") -> None:
+def add_status_effect(effect_id: str, label: str, type_: str = "individual", notes: str | None = None) -> None:
     """Append a new reversible status/relation to status_effects.yaml (a
     fixed set the world's rules/inference/checks all read from — imprisoned,
     cursed, ... and, since Phase 10 patch 16, target-bearing relational
@@ -51,7 +51,17 @@ def add_status_effect(effect_id: str, label: str, type_: str = "individual") -> 
     pipeline_session._resolve_relational_predicates_gen), since a setting's
     cast of statuses/relations isn't something the code should hardcode — a
     future/sci-fi world might add "cryosleep" the same way a fantasy one
-    added "imprisoned"."""
+    added "imprisoned".
+
+    `notes` (Phase 10 patch 22 follow-up 3) is a free-text description of
+    what this status/relation actually *means* in practice — e.g. imprisoned:
+    "물리적으로 수감 장소를 벗어난 행동은 불가능하다." Every LLM-facing
+    context that only ever showed the bare id/label (check_status_consistency,
+    the entity-context lines behind check_rule_and_notes, Step 3's own
+    predicate picklist) gets this appended when present, so a rule-violation
+    judgment has something concrete to reason against instead of guessing
+    real-world implications from a short label alone. Optional and additive
+    — an entry with no notes behaves exactly as before this field existed."""
     effect_id = (effect_id or "").strip()
     label = (label or "").strip()
     if not effect_id or not label:
@@ -61,7 +71,35 @@ def add_status_effect(effect_id: str, label: str, type_: str = "individual") -> 
     effects = load_status_effects()
     if any(e["id"] == effect_id for e in effects):
         raise ValueError(f"이미 존재하는 상태 효과 id입니다: {effect_id}")
-    _save_status_effects(effects + [{"id": effect_id, "label": label, "type": type_}])
+    new_effect = {"id": effect_id, "label": label, "type": type_}
+    notes = (notes or "").strip()
+    if notes:
+        new_effect["notes"] = notes
+    _save_status_effects(effects + [new_effect])
+
+
+def update_status_effect_notes(effect_id: str, notes: str | None) -> None:
+    """Edit an existing status/relation's notes in place (the only field
+    the GUI lets you revise post-creation — id/label/type stay fixed since
+    changing them would silently orphan every timeline record already using
+    this predicate). Passing an empty/None value removes the notes key
+    entirely rather than storing an empty string, keeping the yaml clean."""
+    effects = load_status_effects()
+    notes = (notes or "").strip()
+    updated = []
+    found = False
+    for e in effects:
+        if e["id"] == effect_id:
+            found = True
+            e = dict(e)
+            if notes:
+                e["notes"] = notes
+            else:
+                e.pop("notes", None)
+        updated.append(e)
+    if not found:
+        raise ValueError(f"존재하지 않는 상태 효과 id입니다: {effect_id}")
+    _save_status_effects(updated)
 
 
 def remove_status_effect(effect_id: str) -> None:

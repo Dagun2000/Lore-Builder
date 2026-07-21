@@ -119,15 +119,18 @@ def infer_event(resolved_entities: dict, raw_text: str, years: list) -> Inferred
     )
     valid_ids = ", ".join(resolved_entities.values())
     all_status_effects = schema.load_status_effects()
+
+    def _effect_line(s: dict) -> str:
+        line = f"- {s['id']} ({s['label']})"
+        if s.get("notes"):
+            line += f": {s['notes']}"
+        return line
+
     status_effect_options = "\n".join(
-        f"- {s['id']} ({s['label']})"
-        for s in all_status_effects
-        if s.get("type", "individual") == "individual"
+        _effect_line(s) for s in all_status_effects if s.get("type", "individual") == "individual"
     )
     relational_predicate_options = "\n".join(
-        f"- {s['id']} ({s['label']})"
-        for s in all_status_effects
-        if s.get("type") == "relational"
+        _effect_line(s) for s in all_status_effects if s.get("type") == "relational"
     ) or "(등록된 관계형 predicate 없음)"
     years_text = ", ".join(str(y) for y in years)
 

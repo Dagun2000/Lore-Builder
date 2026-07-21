@@ -41,22 +41,31 @@ def eligible_categories() -> list:
 
 _TAG_PATTERN = re.compile(r"\[([^\[\]]+)\]")
 _YEAR_RANGE_PATTERN = re.compile(r"(\d+)\s*년?\s*(?:부터|[~\-])\s*(\d+)\s*년(?:\s*까지)?")
+# "2090년과 2100년 사이" / "2090년와 2100년 사이" — a separate pattern from
+# _YEAR_RANGE_PATTERN because "과/와 ... 사이" doesn't share a common
+# separator token with "부터...까지"/"~"/"-". Missing this meant a request
+# stating an explicit "A년과 B년 사이" range fell through to the no-hint
+# branch entirely — the year-confirm screen then showed the unrelated
+# auto-computed existence window (e.g. entities' full 2000-onward
+# coexistence range) instead of the range the user actually typed, even
+# though the request never intended to ask for a confirmation at all.
+_YEAR_BETWEEN_PATTERN = re.compile(r"(\d+)\s*년\s*(?:과|와)\s*(\d+)\s*년\s*사이")
 _YEAR_PATTERN = re.compile(r"(\d+)\s*년")
 
 
 def parse_year_hint(text: str) -> tuple:
     """(lower, upper) if `text` explicitly states a year or year range
-    ("2010년", "2000~2010년"), else (None, None) meaning no explicit year
-    was given at all. A bare single year returns (y, y) — the caller
-    decides what a single value means (compose_narrative's is_single_year
-    branch handles the actual constraint; creator_session decides whether
-    to run the count-mismatch check). Bracket contents are excluded from
-    the scan, same reasoning as parser.parse_input: a tag like "[100년
-    전쟁]" isn't a year mention. Two or more loose year mentions with no
-    explicit range separator are ambiguous and treated as no hint at all,
+    ("2010년", "2000~2010년", "2000년과 2010년 사이"), else (None, None)
+    meaning no explicit year was given at all. A bare single year returns
+    (y, y) — the caller decides what a single value means (compose_narrative's
+    is_single_year branch handles the actual constraint; creator_session
+    decides whether to run the count-mismatch check). Bracket contents are
+    excluded from the scan, same reasoning as parser.parse_input: a tag like
+    "[100년 전쟁]" isn't a year mention. Two or more loose year mentions with
+    no explicit range separator are ambiguous and treated as no hint at all,
     falling through to the auto-computed-window flow."""
     stripped = _TAG_PATTERN.sub(" ", text)
-    range_match = _YEAR_RANGE_PATTERN.search(stripped)
+    range_match = _YEAR_RANGE_PATTERN.search(stripped) or _YEAR_BETWEEN_PATTERN.search(stripped)
     if range_match:
         a, b = int(range_match.group(1)), int(range_match.group(2))
         return (a, b) if a <= b else (b, a)
@@ -328,6 +337,16 @@ def _remap_tags(value, tag_to_id: dict):
 
 
 def _entity_context_block(resolved_entities: dict) -> str:
+    """Tagged entities' own stored fields/notes, PLUS each one's related
+    duration/point records (ownership, membership, past events) — found
+    missing in practice: this used to show only the entity's own fields and
+    notes, never its duration history, so Creator had no way to know a
+    tagged character already owns a specific named artifact (a duration
+    'owns' record) and kept falling back to generic language ("검", "명검")
+    even when the character's own Excalibur-owning record was sitting in
+    storage the whole time. Inspector's own context
+    (rag_check._entity_context_lines) already included this; Creator's
+    drafting context just hadn't been given the same information."""
     lines = []
     for tag, entity_id in resolved_entities.items():
         category = schema.category_from_id(entity_id)
@@ -343,6 +362,9 @@ def _entity_context_block(resolved_entities: dict) -> str:
         if record.get("notes"):
             parts.append(f"notes={record['notes']}")
         lines.append(f'{entity_id} ("{tag}"): ' + ", ".join(parts))
+        for related_event in storage.get_events_for_entity(entity_id):
+            if related_event.get("notes"):
+                lines.append(f"{entity_id}의 관련 기록({related_event['id']}): {related_event['notes']}")
     return "\n".join(f"- {line}" for line in lines) if lines else "(참고할 엔티티 정보 없음)"
 
 
@@ -409,11 +431,18 @@ def compose_narrative(
         allowed_note = ""
 
     all_status_effects = schema.load_status_effects()
+
+    def _effect_line(s: dict) -> str:
+        line = f"- {s['id']} ({s['label']})"
+        if s.get("notes"):
+            line += f": {s['notes']}"
+        return line
+
     status_effect_options = "\n".join(
-        f"- {s['id']} ({s['label']})" for s in all_status_effects if s.get("type", "individual") == "individual"
+        _effect_line(s) for s in all_status_effects if s.get("type", "individual") == "individual"
     ) or "(등록된 개인 상태 predicate 없음)"
     relational_predicate_options = "\n".join(
-        f"- {s['id']} ({s['label']})" for s in all_status_effects if s.get("type") == "relational"
+        _effect_line(s) for s in all_status_effects if s.get("type") == "relational"
     ) or "(등록된 관계형 predicate 없음)"
 
     is_single_year = lower == upper
@@ -477,6 +506,13 @@ def compose_narrative(
         "없어도 된다.\n"
         "  - set_closed: 이미 시작과 끝이 모두 지난 상태/관계를 한 번에 서술함 (예: '2050년부터 "
         "2060년까지 수감되어 있었다'). start_year와 end_year 둘 다 필요.\n\n"
+        "관계형 predicate에서, 이번 서사가 이미 열려 있는 관계와 양립할 수 없는 정반대의 새 "
+        "관계를 성립시킨다면(예: 원수 관계였던 두 사람이 화해하여 친구가 되는 경우, 동맹이었던 "
+        "세력이 배신하여 적대 관계가 되는 경우) — 기존 관계 옆에 새 관계를 별개로 set하지 "
+        "마라. 반드시 먼저 기존의 상충되는 관계를 그 predicate 그대로 clear로 닫고, 그 다음에 "
+        "새로운 관계를 별도 사건으로 set하라. 화해/배신/절교/결별처럼 관계가 뒤바뀌는 서술은 "
+        "새 관계의 시작이자 동시에 기존 관계의 종료를 의미하며, 종료를 명시하지 않으면 두 "
+        "관계가 동시에 열린 채로 남아 모순된 기록이 된다.\n\n"
         "events 배열의 순서 = 검증 순서다: 각 사건은 자신보다 앞에 나온 사건들만 이미 벌어진 "
         "일로 보고 검증되고, 뒤에 나온 사건은 아직 모른다. 따라서 clear로 기존 상태/관계를 "
         "끝내야만 말이 되는 사건이 있다면, 그 clear를 반드시 그 사건보다 앞에 배치하라 — "
@@ -501,7 +537,11 @@ def compose_narrative(
         "서사에 자연스럽게 등장시켜도 좋다 — 등장시켰다면 involved_entities에 반드시 포함시켜라 "
         "(포함시키지 않으면 그 엔티티 쪽에서는 이 사건이 전혀 기록되지 않는다). 목록에 없는 "
         "장소/사물/세력은 지어내지 마라 — 서사에 특별히 필요하지 않다면 억지로 아무거나 "
-        "골라 넣지 마라.\n"
+        "골라 넣지 마라. 특히, 위 '엔티티 정보'에 태그된 인물이 이미 어떤 사물을 소유하고 "
+        "있거나(예: 소유 기간이 이 서사의 연도에 걸쳐 유효한 'owns' 기록) 어떤 세력에 소속되어 "
+        "있다는 기록이 있고, 요청 내용이 '검', '명검', '단체' 같은 뭉뚱그린 표현으로 그런 대상을 "
+        "가리킬 수 있는 상황이라면 — 지어낸 일반 표현 대신 그 구체적인 기존 entity_id를 지목해서 "
+        "써라(예: 그냥 '명검'이 아니라 실제 소유 중인 '엑스칼리버'로).\n"
         f"등록된 장소/사물/세력 목록:\n{backdrop_block}\n"
         f"{new_entity_block}"
         f"{single_year_instruction}{feedback_block}{supplement_block}\n\n"
@@ -628,6 +668,15 @@ def inspect_draft(resolved_entities: dict, draft: NarrativeDraft) -> InspectionR
     hard_rule_docs = rag_check._get_hard_rule_texts()
     approved_context_lines = []  # this draft's own already-approved events' notes
     approved_years = {}  # entity_id -> [year, ...] already used earlier in this draft
+    # (entity_id, predicate) pairs closed by an earlier event in this same
+    # draft (a `clear`/`set_closed` duration_effect) — nothing is saved yet,
+    # so storage still shows the original record open; without tracking
+    # this separately, a later event's context kept getting the stale
+    # record's confirmatory [활성] tag even after the release event had
+    # already been approved earlier in the same draft (observed: a prison
+    # release event passed, but the very next event was still rejected for
+    # supposedly still being imprisoned).
+    closed_predicates = set()
 
     for i, event in enumerate(draft.events):
         involved = _event_involved(event, entity_ids)
@@ -652,7 +701,8 @@ def inspect_draft(resolved_entities: dict, draft: NarrativeDraft) -> InspectionR
                 return InspectionResult(approved=False, reason=reason, failed_event_index=i)
 
         judgments = rag_check.check_rule_and_notes(
-            involved, event.notes, hard_rule_docs, event_year, extra_context=approved_context_lines
+            involved, event.notes, hard_rule_docs, event_year,
+            extra_context=approved_context_lines, closed_predicates=closed_predicates,
         )
         if judgments:
             reasons = "; ".join(f"[{j.type}] {j.reason}" for j in judgments)
@@ -665,6 +715,14 @@ def inspect_draft(resolved_entities: dict, draft: NarrativeDraft) -> InspectionR
             )
             if candidate_years:
                 approved_years.setdefault(entity_id, []).extend(candidate_years)
+
+        if event.event_type == "duration" and event.duration_effect:
+            action = event.duration_effect.get("action", "set")
+            if action in ("clear", "set_closed"):
+                closer_entity = event.duration_effect.get("entity")
+                predicate = event.duration_effect.get("predicate")
+                if closer_entity and predicate:
+                    closed_predicates.add((closer_entity, predicate))
 
     return InspectionResult(approved=True)
 

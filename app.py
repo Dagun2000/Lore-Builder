@@ -880,6 +880,17 @@ def _render_status_effects_panel() -> None:
             col1, col2 = st.columns([4, 1])
             col1.write(f"**{effect_id}** ({effect['label']})")
 
+            with st.expander("설명 (LLM에게 이 상태/관계가 실제로 무엇을 뜻하는지 알려줍니다)"):
+                notes_key = f"status_effect_notes_{effect_id}"
+                new_notes = st.text_area(
+                    "설명", value=effect.get("notes") or "", key=notes_key,
+                    placeholder="예: 물리적으로 수감 장소를 벗어난 행동은 불가능하다.",
+                )
+                if st.button("설명 저장", key=f"status_effect_notes_save_{effect_id}"):
+                    schema.update_status_effect_notes(effect_id, new_notes)
+                    st.success("설명을 저장했습니다.")
+                    st.rerun()
+
             if pending != effect_id:
                 if col2.button("삭제", key=f"status_effect_delete_{effect_id}"):
                     st.session_state.status_effect_confirm_delete = effect_id
@@ -911,11 +922,15 @@ def _render_status_effects_panel() -> None:
         new_type = st.selectbox(
             "유형", list(_STATUS_EFFECT_TYPE_LABELS.values()), key="status_effect_new_type"
         )
+        new_notes = st.text_area(
+            "설명 (선택, LLM에게 실제 의미를 알려줍니다)", key="status_effect_new_notes",
+            placeholder="예: 물리적으로 수감 장소를 벗어난 행동은 불가능하다.",
+        )
         submitted = st.form_submit_button("추가", key="status_effect_add")
     if submitted:
         type_value = next(k for k, v in _STATUS_EFFECT_TYPE_LABELS.items() if v == new_type)
         try:
-            schema.add_status_effect(new_id, new_label, type_value)
+            schema.add_status_effect(new_id, new_label, type_value, notes=new_notes)
         except ValueError as exc:
             st.error(str(exc))
         else:
@@ -1266,6 +1281,16 @@ def _render_timeline_detail(entity_id: str, entity: dict) -> None:
         st.session_state[review_key] = True
         st.rerun()
 
+    st.subheader("이벤트 삭제")
+    if st.button("이 이벤트 삭제", key=f"tl_delete_{entity_id}"):
+        result = deletion.delete_event(entity_id)
+        message = f"{result.deleted_id} 삭제 완료."
+        if result.affected_entities:
+            message += " 포인터가 제거된 엔티티: " + ", ".join(result.affected_entities)
+        st.success(message)
+        _navigate_to_entity(None)
+        st.rerun()
+
     if not st.session_state.get(review_key):
         return
 
@@ -1310,16 +1335,6 @@ def _render_timeline_detail(entity_id: str, entity: dict) -> None:
         st.session_state.pop(review_key, None)
         st.session_state.pop(pending_key, None)
         st.success("이벤트가 갱신되었습니다.")
-        st.rerun()
-
-    st.subheader("이벤트 삭제")
-    if st.button("이 이벤트 삭제", key=f"tl_delete_{entity_id}"):
-        result = deletion.delete_event(entity_id)
-        message = f"{result.deleted_id} 삭제 완료."
-        if result.affected_entities:
-            message += " 포인터가 제거된 엔티티: " + ", ".join(result.affected_entities)
-        st.success(message)
-        _navigate_to_entity(None)
         st.rerun()
 
 

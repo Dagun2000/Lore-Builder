@@ -5,6 +5,7 @@ status_effects:
 - id: imprisoned
   label: 수감
   type: individual
+  notes: 물리적으로 수감 장소를 벗어난 행동(다른 지역 방문, 자유로운 이동 등)은 불가능하다. 감방 안에서의 행동(대화, 생각, 식사 등)은 가능하다.
 - id: missing
   label: 실종
   type: individual
@@ -25,4 +26,10 @@ status_effects:
   type: relational
 - id: in_love_with
   label: in_love_with
+  type: relational
+- id: enemies_with
+  label: enemies_with
+  type: relational
+- id: champion_of
+  label: champion_of
   type: relational
