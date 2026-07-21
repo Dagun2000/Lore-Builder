@@ -9,6 +9,7 @@ Uses the reasoning-tier model (config.get_model("reasoning")).
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from . import config, schema, storage
@@ -23,12 +24,12 @@ class Judgment:
     status_effect_id: str | None = None
 
 
-def _get_llm():
-    return config.get_chat_model("reasoning", temperature=0)
+def _get_llm(tier: str = "reasoning"):
+    return config.get_chat_model(tier, temperature=0)
 
 
-def _invoke_llm(prompt: str) -> str:
-    response = _get_llm().invoke(prompt)
+def _invoke_llm(prompt: str, tier: str = "reasoning") -> str:
+    response = _get_llm(tier).invoke(prompt)
     return getattr(response, "content", str(response)).strip()
 
 
@@ -214,8 +215,26 @@ def _entity_context_lines(
     still active, outweighing the plain-text mention of the release sitting
     in extra_context. Matching records are annotated as if not active
     (patch 21's plain, untagged treatment), not dropped — the fact itself
-    still carries full weight, just without the misleading confirmatory tag."""
+    still carries full weight, just without the misleading confirmatory tag.
+
+    Deduped by event id (token-diet pass): two involved entities that share
+    most of their history used to each print every shared event in full
+    under their own section, doubling that portion of the context for zero
+    added information — see creator._entity_context_block, which had the
+    exact same duplication and got the same fix. Fixed a latent
+    correctness gap while restructuring this: `already_closed` used to be
+    checked as (currently-iterated entity_id, predicate), which only
+    actually matches what closed_predicates stores (always the record's
+    "entity"/closer side, from duration_effect.get("entity")) when that
+    tagged entity happens to be iterated from the entity side — from the
+    target side it silently never matched, so a record already closed
+    earlier in the same draft could still show its stale [활성] tag
+    whenever it was reached via the target's own event list instead of the
+    closer's. Keying off the record's own `entity` field directly fixes
+    that regardless of which tagged entity is being walked."""
     lines = []
+    seen_events: dict = {}
+    event_order = []
     for entity_id in entities:
         category = schema.category_from_id(entity_id)
         if category is None:
@@ -243,23 +262,38 @@ def _entity_context_lines(
             range_note = _duration_range_note(related_event)
             if not related_event.get("notes") and not range_note:
                 continue
-            already_closed = closed_predicates and (entity_id, related_event.get("predicate")) in closed_predicates
-            annotation = None if already_closed else _duration_activity_annotation(related_event, event_year)
-            prefix = f"{annotation} " if annotation else ""
-            line = f"{entity_id}의 관련 기록({related_event['id']}): {prefix}{related_event['notes'] or ''}"
-            if range_note:
-                line += f" {range_note}"
-            # Phase 10 patch 22 follow-up 3: the predicate's own registered
-            # meaning (status_effects.yaml's notes field), when set, is
-            # appended here regardless of active/inactive — this is what
-            # actually told the LLM "using an item requires currently
-            # owning it" or "imprisoned means physically unable to leave",
-            # instead of the LLM inferring real-world implications from a
-            # bare predicate name alone.
-            predicate_notes = _status_effect_notes_map().get(related_event.get("predicate"))
-            if predicate_notes:
-                line += f" (predicate '{related_event.get('predicate')}'의 의미: {predicate_notes})"
-            lines.append(line)
+            eid = related_event["id"]
+            if eid not in seen_events:
+                seen_events[eid] = {"entities": [], "event": related_event, "range_note": range_note}
+                event_order.append(eid)
+            if entity_id not in seen_events[eid]["entities"]:
+                seen_events[eid]["entities"].append(entity_id)
+
+    for eid in event_order:
+        info = seen_events[eid]
+        related_event = info["event"]
+        record_entity = related_event.get("entity")
+        already_closed = bool(
+            closed_predicates and record_entity
+            and (record_entity, related_event.get("predicate")) in closed_predicates
+        )
+        annotation = None if already_closed else _duration_activity_annotation(related_event, event_year)
+        prefix = f"{annotation} " if annotation else ""
+        entity_label = ", ".join(info["entities"])
+        line = f"{entity_label}의 관련 기록({eid}): {prefix}{related_event.get('notes') or ''}"
+        if info["range_note"]:
+            line += f" {info['range_note']}"
+        # Phase 10 patch 22 follow-up 3: the predicate's own registered
+        # meaning (status_effects.yaml's notes field), when set, is
+        # appended here regardless of active/inactive — this is what
+        # actually told the LLM "using an item requires currently
+        # owning it" or "imprisoned means physically unable to leave",
+        # instead of the LLM inferring real-world implications from a
+        # bare predicate name alone.
+        predicate_notes = _status_effect_notes_map().get(related_event.get("predicate"))
+        if predicate_notes:
+            line += f" (predicate '{related_event.get('predicate')}'의 의미: {predicate_notes})"
+        lines.append(line)
     if extra_context:
         lines.extend(extra_context)
     return lines
@@ -548,71 +582,95 @@ def check_rule_and_notes(
 # 2-4. Reversible status consistency
 # ---------------------------------------------------------------------------
 
-def check_status_consistency(entity_id: str, raw_text: str, event_year: int) -> Judgment | None:
-    """Gated by event_year: if none of entity_id's personal-status duration
-    events (Phase 10 — a timeline record with predicate=a status_effects.yaml
-    id, no target) actually cover event_year, there's nothing for the event
-    to be consistent or inconsistent *with* at that point in time, so skip
-    the LLM call entirely rather than asking it to judge against a status
+def check_status_consistency(entities: list, raw_text: str, event_year: int) -> list[Judgment]:
+    """Batched across every entity involved in the same event (Phase 10
+    token-diet pass) — this used to run once per entity_id, each its own
+    separate LLM call, so a 2-character event already cost 2 of these on
+    top of check_rule_and_notes' own call. Same judgment logic and prompt
+    style, just asked once for every entity that actually has an active
+    individual status, instead of once per entity regardless.
+
+    Gated per-entity by event_year: if none of an entity's personal-status
+    duration events (Phase 10 — a timeline record with predicate=a
+    status_effects.yaml id, no target) actually cover event_year, there's
+    nothing for the event to be consistent or inconsistent *with* at that
+    point in time — an entity with no active status is simply left out of
+    the prompt entirely, and if nobody involved has one, the LLM call is
+    skipped altogether rather than asking it to judge against a status
     that (from the timeline's perspective) hadn't started yet, or had
     already ended, when this event happened."""
+    all_effects = schema.load_status_effects()
     # Phase 10 patch 16: status_effects.yaml now also holds target-bearing
     # relational predicates (exiled, ...) alongside personal statuses — this
     # check is specifically about the latter (its prompt has no notion of a
     # target to reason about), so relational entries are excluded here, not
     # just historically absent.
-    status_ids = [
-        s["id"] for s in schema.load_status_effects() if s.get("type", "individual") == "individual"
-    ]
-    active_effects = [
-        sid for sid in status_ids if storage.get_current_state(entity_id, sid, event_year)
-    ]
-    if not active_effects:
-        return None
-
-    all_effects = schema.load_status_effects()
+    status_ids = [s["id"] for s in all_effects if s.get("type", "individual") == "individual"]
     label_map = {s["id"]: s["label"] for s in all_effects}
     notes_map = {s["id"]: s.get("notes") for s in all_effects}
-    effect_lines = "\n".join(
-        f"- {eid} ({label_map.get(eid, eid)})" + (f": {notes_map[eid]}" if notes_map.get(eid) else "")
-        for eid in active_effects
+
+    per_entity_active = {}
+    for entity_id in entities:
+        active = [sid for sid in status_ids if storage.get_current_state(entity_id, sid, event_year)]
+        if active:
+            per_entity_active[entity_id] = active
+    if not per_entity_active:
+        return []
+
+    def _effect_lines(active_effects: list) -> str:
+        return "\n".join(
+            f"  - {eid} ({label_map.get(eid, eid)})" + (f": {notes_map[eid]}" if notes_map.get(eid) else "")
+            for eid in active_effects
+        )
+
+    entities_block = "\n".join(
+        f"- {entity_id}:\n{_effect_lines(active)}" for entity_id, active in per_entity_active.items()
     )
 
     prompt = (
-        "너는 판타지 세계관의 상태 정합성 감사관이다. 아래 엔티티에게 현재 해제되지 않은 "
-        "상태(reversible status)가 걸려 있다.\n\n"
-        f"엔티티: {entity_id}\n"
-        f"현재 상태:\n{effect_lines}\n\n"
+        "너는 판타지 세계관의 상태 정합성 감사관이다. 아래 엔티티들에게 각각 현재 해제되지 "
+        "않은 상태(reversible status)가 걸려 있다.\n\n"
+        f"엔티티별 현재 상태:\n{entities_block}\n\n"
         "각 상태 옆에 붙은 설명(있는 경우)은 그 상태가 실제로 무엇을 허용하고 무엇을 "
         "금지하는지 정의한 것이다 — 이름만으로 짐작하지 말고, 설명이 있다면 그 내용을 "
-        "판단의 직접적인 근거로 삼아라. 설명이 없는 상태는 이름과 상식적인 함의로 판단하라.\n\n"
+        "판단의 직접적인 근거로 삼아라. 설명이 없는 상태는 이름과 상식적인 함의로 판단하라. "
+        "엔티티별로 서로 독립적으로 판단하라 — 한 엔티티의 상태 판단이 다른 엔티티의 판단에 "
+        "영향을 주지 않는다.\n\n"
         f"새로 입력된 사건 문장: {raw_text}\n\n"
-        "이 문장이 위 상태와 어떤 관계인지 다음 중 정확히 하나의 JSON으로 답하라:\n"
-        '1) 자연스럽게 양립: {"result": "ok"}\n'
-        '2) 위 상태를 해제하는 행동: {"result": "clears", "status_effect_id": "해당 상태 id", "reason": "판단 근거"}\n'
-        '3) 위 상태와 상충될 가능성: {"result": "conflict", "status_effect_id": "해당 상태 id", "reason": "판단 근거"}\n'
-        "JSON 이외의 텍스트는 출력하지 마라."
+        "이 문장이 위 엔티티 각각의 상태와 어떤 관계인지 판단하라. 자연스럽게 양립하는 "
+        "엔티티는 results 배열에서 아예 제외하고, 그 외의 경우만 아래 형식으로 답하라:\n"
+        '{"results": [{"entity_id": "해당 엔티티", "result": "clears" 또는 "conflict", '
+        '"status_effect_id": "해당 상태 id", "reason": "판단 근거"}, ...]}\n'
+        '모든 엔티티가 자연스럽게 양립하면 {"results": []}을 반환하라. JSON 이외의 텍스트는 '
+        "출력하지 마라."
     )
 
-    raw = _invoke_llm(prompt)
+    # "simple" tier (not "reasoning", unlike every other check in this
+    # file) — this judgment is narrower and more mechanical than a rule/
+    # notes-conflict call: compare a sentence against an explicitly
+    # described status and decide ok/clears/conflict, no open-ended world-
+    # rule reasoning involved. Worth testing against real status-heavy
+    # scenes (imprisoned, incapacitated, ...) before trusting it broadly —
+    # a weaker model could plausibly miss a subtler case.
+    raw = _invoke_llm(prompt, tier="simple")
     data = _extract_json(raw)
-    result = data.get("result")
+    items = data.get("results") or []
 
-    if result == "clears":
-        return Judgment(
-            type="clears_status",
-            reason=data.get("reason", ""),
-            entity_id=entity_id,
-            status_effect_id=data.get("status_effect_id"),
+    judgments = []
+    for item in items:
+        result = item.get("result")
+        entity_id = item.get("entity_id")
+        if result not in ("clears", "conflict") or entity_id not in per_entity_active:
+            continue
+        judgments.append(
+            Judgment(
+                type="clears_status" if result == "clears" else "conflict",
+                reason=item.get("reason", ""),
+                entity_id=entity_id,
+                status_effect_id=item.get("status_effect_id"),
+            )
         )
-    if result == "conflict":
-        return Judgment(
-            type="conflict",
-            reason=data.get("reason", ""),
-            entity_id=entity_id,
-            status_effect_id=data.get("status_effect_id"),
-        )
-    return None
+    return judgments
 
 
 # ---------------------------------------------------------------------------
@@ -641,11 +699,25 @@ def run_rag_checks(entities: list, raw_text: str, event_year: int) -> list:
     # actual violation went undetected. retrieve_context() stays available
     # as a general-purpose utility, just not fed into this specific check.
     hard_rule_docs = _get_hard_rule_texts()
-    judgments = check_rule_and_notes(entities, raw_text, hard_rule_docs, event_year)
 
-    for entity_id in entities:
-        status_judgment = check_status_consistency(entity_id, raw_text, event_year)
-        if status_judgment is not None:
-            judgments.append(status_judgment)
+    # check_rule_and_notes and check_status_consistency are independent —
+    # neither's result feeds the other — so they can run concurrently
+    # instead of back to back, roughly halving wall-clock latency for
+    # events where both actually fire an LLM call. Gated by
+    # PARALLEL_RAG_CHECKS (default true): a cloud provider handles two
+    # concurrent requests fine, but a local Ollama instance running as
+    # large a model as VRAM allows may only be able to serve one
+    # generation at a time, where firing two at once contends for the same
+    # GPU memory instead of actually parallelizing — see
+    # config.parallel_rag_checks_enabled's own docstring.
+    if config.parallel_rag_checks_enabled():
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            rule_notes_future = pool.submit(check_rule_and_notes, entities, raw_text, hard_rule_docs, event_year)
+            status_future = pool.submit(check_status_consistency, entities, raw_text, event_year)
+            judgments = rule_notes_future.result()
+            judgments.extend(status_future.result())
+    else:
+        judgments = check_rule_and_notes(entities, raw_text, hard_rule_docs, event_year)
+        judgments.extend(check_status_consistency(entities, raw_text, event_year))
 
     return judgments

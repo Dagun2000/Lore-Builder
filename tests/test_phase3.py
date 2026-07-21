@@ -24,21 +24,19 @@ def test_infer_event_basic_point_event():
 def test_check_status_consistency_detects_clear():
     # char_쟝's seeded "imprisoned" range starts 2085, still open — 2100
     # falls inside it, so this is a genuine gated-in case.
-    judgment = rag_check.check_status_consistency(
-        "char_쟝", "쟝이 탈출해서 마을로 도망쳤다.", 2100
+    judgments = rag_check.check_status_consistency(
+        ["char_쟝"], "쟝이 탈출해서 마을로 도망쳤다.", 2100
     )
 
-    assert judgment is not None
-    assert judgment.type == "clears_status"
+    assert any(j.type == "clears_status" for j in judgments)
 
 
 def test_check_status_consistency_detects_conflict():
-    judgment = rag_check.check_status_consistency(
-        "char_쟝", "쟝이 수감 중에 전장에서 검을 휘둘렀다.", 2100
+    judgments = rag_check.check_status_consistency(
+        ["char_쟝"], "쟝이 수감 중에 전장에서 검을 휘둘렀다.", 2100
     )
 
-    assert judgment is not None
-    assert judgment.type == "conflict"
+    assert any(j.type == "conflict" for j in judgments)
 
 
 def test_check_rule_violation_detects_magic_without_mana_stone():
@@ -86,4 +84,4 @@ def test_no_false_positives_for_mundane_event():
 
     assert rag_check.check_rule_violation(["char_미라"], raw_text, combined_docs) is None
     assert rag_check.check_notes_conflict(["char_미라"], raw_text) is None
-    assert rag_check.check_status_consistency("char_미라", raw_text, 2100) is None
+    assert rag_check.check_status_consistency(["char_미라"], raw_text, 2100) == []

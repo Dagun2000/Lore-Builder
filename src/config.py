@@ -53,6 +53,19 @@ def get_model(tier: str) -> str:
         raise ValueError(f"Unknown model tier: {tier!r}")
 
 
+def parallel_rag_checks_enabled() -> bool:
+    """Whether rag_check.run_rag_checks may fire its independent LLM calls
+    (check_rule_and_notes, check_status_consistency) concurrently instead
+    of sequentially. Defaults to true (cloud providers have no trouble
+    serving two concurrent requests, and it roughly halves wall-clock
+    latency for events where both checks actually fire) — but a local
+    Ollama setup running as large a model as VRAM allows may only be able
+    to run one generation at a time at all, where firing two at once could
+    contend for the same GPU memory instead of actually running in
+    parallel. Set PARALLEL_RAG_CHECKS=false in .env to force sequential."""
+    return os.environ.get("PARALLEL_RAG_CHECKS", "true").strip().lower() not in ("false", "0", "no")
+
+
 def get_chat_model(tier: str, temperature: float = 0):
     """Instantiate the LangChain chat model for `tier` under the currently
     configured provider (LLM_PROVIDER env var, default "openai"). Every LLM

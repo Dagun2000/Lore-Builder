@@ -344,8 +344,18 @@ def _entity_context_block(resolved_entities: dict) -> str:
     even when the character's own Excalibur-owning record was sitting in
     storage the whole time. Inspector's own context
     (rag_check._entity_context_lines) already included this; Creator's
-    drafting context just hadn't been given the same information."""
+    drafting context just hadn't been given the same information.
+
+    Deduped by event id (token-diet pass): two tagged entities that share
+    most of their history (e.g. two characters who adventure together)
+    used to each print every shared event's notes in full under their own
+    section — measured at 40% duplicate lines for a real pair with ~15
+    shared events, and that duplication is resent in full on every single
+    retry. Each real event is now printed exactly once, attributed to
+    every tagged entity it touches on one combined line."""
     lines = []
+    seen_events: dict = {}
+    event_order = []
     for tag, entity_id in resolved_entities.items():
         category = schema.category_from_id(entity_id)
         if category is None:
@@ -364,20 +374,29 @@ def _entity_context_block(resolved_entities: dict) -> str:
             range_note = rag_check._duration_range_note(related_event)
             if not related_event.get("notes") and not range_note:
                 continue
-            line = f"{entity_id}의 관련 기록({related_event['id']}): {related_event.get('notes') or ''}"
-            if range_note:
-                # The real, already-stored start_year/end_year — spelled
-                # out explicitly regardless of what notes says, since notes
-                # is free prose that never gets rewritten when a field like
-                # end_year is edited independently afterward (e.g. via the
-                # GUI field editor). Without this, Creator has no way to
-                # know a status it's about to narrate the end of already
-                # has a real, fixed end date on file, and just invents its
-                # own instead (caught in practice: a fresh "released in
-                # 2086" event drafted for a status whose real end_year was
-                # already 2090).
-                line += f" {range_note}"
-            lines.append(line)
+            eid = related_event["id"]
+            if eid not in seen_events:
+                seen_events[eid] = {"entities": [], "event": related_event, "range_note": range_note}
+                event_order.append(eid)
+            if entity_id not in seen_events[eid]["entities"]:
+                seen_events[eid]["entities"].append(entity_id)
+
+    for eid in event_order:
+        info = seen_events[eid]
+        entity_label = ", ".join(info["entities"])
+        line = f"{entity_label}의 관련 기록({eid}): {info['event'].get('notes') or ''}"
+        if info["range_note"]:
+            # The real, already-stored start_year/end_year — spelled out
+            # explicitly regardless of what notes says, since notes is
+            # free prose that never gets rewritten when a field like
+            # end_year is edited independently afterward (e.g. via the GUI
+            # field editor). Without this, Creator has no way to know a
+            # status it's about to narrate the end of already has a real,
+            # fixed end date on file, and just invents its own instead
+            # (caught in practice: a fresh "released in 2086" event
+            # drafted for a status whose real end_year was already 2090).
+            line += f" {info['range_note']}"
+        lines.append(line)
     return "\n".join(f"- {line}" for line in lines) if lines else "(참고할 엔티티 정보 없음)"
 
 
@@ -731,10 +750,17 @@ def inspect_draft(resolved_entities: dict, draft: NarrativeDraft) -> InspectionR
             reason = f"{i + 1}번째 사건(\"{event.notes}\")이 검증에 실패했습니다: {reasons}"
             return InspectionResult(approved=False, reason=reason, failed_event_index=i)
 
-        for entity_id in involved:
+        # One combined line for every involved entity, not one line per
+        # entity (token-diet pass) — a 2+ entity event used to repeat its
+        # own notes text once per participant, the same duplication
+        # _entity_context_block had, just accumulating across a whole
+        # draft's worth of events instead of a whole entity's history.
+        if involved:
+            entity_label = ", ".join(involved)
             approved_context_lines.append(
-                f"{entity_id}의 관련 기록(이번 초안 {i + 1}번째 사건): {event.notes}"
+                f"{entity_label}의 관련 기록(이번 초안 {i + 1}번째 사건): {event.notes}"
             )
+        for entity_id in involved:
             if candidate_years:
                 approved_years.setdefault(entity_id, []).extend(candidate_years)
 
@@ -753,7 +779,10 @@ def inspect_draft(resolved_entities: dict, draft: NarrativeDraft) -> InspectionR
 # Reflection loop — Creator drafts, Inspector checks, repeat on rejection
 # ---------------------------------------------------------------------------
 
-MAX_RETRIES = 4  # spec: "3~5회"
+MAX_RETRIES = 3  # spec: "3~5회" — lowered from 4 (token-diet pass): each
+# retry re-drafts and re-checks the whole batch from scratch (see
+# inspect_draft's own docstring), so worst-case cost scales directly with
+# this number.
 
 
 @dataclass

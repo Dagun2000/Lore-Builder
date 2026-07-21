@@ -179,6 +179,8 @@ A few things to keep in mind when hand-editing these:
 
 Set `LLM_PROVIDER` in `.env` to `openai`, `anthropic`, `ollama`, or `google`; `.env.example` lists every provider's API key variable and optional per-tier model overrides (a cheaper "simple" model and a stronger "reasoning" model). Ollama needs no API key, just `OLLAMA_BASE_URL` pointing at a running instance.
 
+`PARALLEL_RAG_CHECKS` (defaults to `true`) controls whether the pipeline's two independent per-event checks fire concurrently — a real latency win on a cloud provider, but set it to `false` if you're running a local Ollama model sized to fill your available VRAM, where two concurrent generations can contend for the same GPU memory instead of actually running in parallel.
+
 ### Setting the world language
 
 `WORLD_LANGUAGE` in `.env` (defaults to `ko`, matching the sample world) declares what language your own world's content — and the enum options you write in `schema_registry.yaml`/`status_effects.yaml` — is in. **Set it once, before entering any data.** Changing it mid-project risks orphaning already-saved values against a since-changed options list and mixing two languages into one project's lore. As of now this is a declared setting, not yet an enforced one — the AI's own prompts are still fixed in Korean regardless of this value; see the next section if you want to change that yourself.
