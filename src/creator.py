@@ -226,14 +226,12 @@ class NarrativeDraft:
 
 
 def _get_llm():
-    from langchain_openai import ChatOpenAI
-
     # temperature=0.7, unlike every other LLM call in this codebase
     # (always 0) — those are classification/judgment calls that need to be
     # reproducible; this one is creative drafting, and a retry after
     # Inspector rejection should actually explore a different narrative,
     # not deterministically regenerate the same rejected draft.
-    return ChatOpenAI(model=config.get_model("reasoning"), temperature=0.7)
+    return config.get_chat_model("reasoning", temperature=0.7)
 
 
 def _invoke_llm(prompt: str) -> str:

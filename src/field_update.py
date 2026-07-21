@@ -142,9 +142,7 @@ class RelevantMatch:
 
 
 def _get_llm():
-    from langchain_openai import ChatOpenAI
-
-    return ChatOpenAI(model=config.get_model("reasoning"), temperature=0)
+    return config.get_chat_model("reasoning", temperature=0)
 
 
 def _invoke_llm(prompt: str) -> str:

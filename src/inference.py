@@ -60,9 +60,7 @@ class InferredEvent:
 
 
 def _get_llm(tier: str = "reasoning"):
-    from langchain_openai import ChatOpenAI
-
-    return ChatOpenAI(model=config.get_model(tier), temperature=0)
+    return config.get_chat_model(tier, temperature=0)
 
 
 def _invoke_llm(prompt: str, tier: str = "reasoning") -> str:

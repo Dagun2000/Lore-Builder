@@ -2,6 +2,7 @@ status_effects:
 - id: sealed
   label: 봉인
   type: individual
+  notes: 봉인된 대상은 스스로의 힘/능력을 사용하거나 자유롭게 활동할 수 없다. 봉인이 해제되어야만 원래대로 돌아온다.
 - id: imprisoned
   label: 수감
   type: individual
@@ -9,27 +10,56 @@ status_effects:
 - id: missing
   label: 실종
   type: individual
+  notes: 실종된 인물의 생사나 행방은 알려지지 않은 상태다. 실종 중에는 목격되거나 활동한 것으로 서술될 수 없다 — 다시 나타나거나 발견되어야 실종이 해제된다.
 - id: cursed
   label: 저주받음
   type: individual
+  notes: 저주받은 대상은 저주의 구체적 내용에 명시된 제약이나 불이익을 겪는다. 저주가 정확히 무엇을 유발하는지는 사건 문장이나 별도 설정을 따른다.
 - id: incapacitated
   label: 부상/중태
   type: individual
+  notes: 격렬한 신체 활동(전투, 장거리 이동 등)은 불가능하지만, 대화나 제자리에서의 행동은 가능하다. 회복해야 해제된다.
 - id: lost
   label: 분실
   type: individual
+  notes: 분실된 물건은 원래 소유자가 소지하거나 사용할 수 없다. 다시 찾아야 분실 상태가 해제된다.
 - id: exiled
   label: 추방
   type: relational
+  notes: 추방된 대상은 추방시킨 장소/세력에 다시 나타나거나 접촉할 수 없다. 추방이 해제되어야 돌아올 수 있다.
 - id: friends_with
   label: friends_with
   type: relational
+  notes: 서로 우호적인 관계다. 배타적이지 않으며 한 사람이 여러 사람과 동시에 이 관계를 가질 수 있다.
 - id: in_love_with
   label: in_love_with
   type: relational
+  notes: 한쪽 또는 양쪽이 상대에게 연애 감정을 품고 있다. 관계가 끝나면 반드시 해제(clear)해야 한다.
 - id: enemies_with
   label: enemies_with
   type: relational
+  notes: 서로 적대적인 관계다. 화해 등으로 관계가 바뀌면 이 기록을 먼저 해제(clear)하고 새로운 관계를 시작해야 한다 — 옆에 별개로 새 관계만 추가하면 안 된다.
 - id: champion_of
   label: champion_of
   type: relational
+  notes: 특정 인물/세력을 대표하거나 수호하는 역할을 공식적으로 맡고 있다.
+- id: member_of
+  label: member_of
+  type: relational
+  notes: 해당 세력의 정식 구성원이다. 소속이 끝나면(탈퇴, 추방, 해체 등) 반드시 해제(clear)해야 한다.
+- id: owns
+  label: owns
+  type: relational
+  notes: 해당 사물을 실제로 소유하고 있다. 그 사물을 사용/착용/휘두르는 행동은 이 상태가 활성일 때만 앞뒤가 맞는다 — 분실하거나 양도하면 반드시 해제(clear)해야 한다.
+- id: controls
+  label: controls
+  type: relational
+  notes: 해당 장소/세력을 실질적으로 지배·통치하고 있다.
+- id: knows
+  label: knows
+  type: relational
+  notes: 서로 아는 사이다 — 최소한 한 번은 만난 적이 있다는 사실을 못박는 관계다. 이 기록의 시작 연도보다 이전 시점에 둘이 함께 등장하는 사건은 성립할 수 없다.
+- id: founder_of
+  label: founder_of
+  type: relational
+  notes: 해당 세력/장소를 처음 창설·건국한 인물이다. 과거의 확정된 사실이므로 보통 해제되지 않는다.
