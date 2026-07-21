@@ -361,8 +361,23 @@ def _entity_context_block(resolved_entities: dict) -> str:
             parts.append(f"notes={record['notes']}")
         lines.append(f'{entity_id} ("{tag}"): ' + ", ".join(parts))
         for related_event in storage.get_events_for_entity(entity_id):
-            if related_event.get("notes"):
-                lines.append(f"{entity_id}의 관련 기록({related_event['id']}): {related_event['notes']}")
+            range_note = rag_check._duration_range_note(related_event)
+            if not related_event.get("notes") and not range_note:
+                continue
+            line = f"{entity_id}의 관련 기록({related_event['id']}): {related_event.get('notes') or ''}"
+            if range_note:
+                # The real, already-stored start_year/end_year — spelled
+                # out explicitly regardless of what notes says, since notes
+                # is free prose that never gets rewritten when a field like
+                # end_year is edited independently afterward (e.g. via the
+                # GUI field editor). Without this, Creator has no way to
+                # know a status it's about to narrate the end of already
+                # has a real, fixed end date on file, and just invents its
+                # own instead (caught in practice: a fresh "released in
+                # 2086" event drafted for a status whose real end_year was
+                # already 2090).
+                line += f" {range_note}"
+            lines.append(line)
     return "\n".join(f"- {line}" for line in lines) if lines else "(참고할 엔티티 정보 없음)"
 
 
@@ -695,6 +710,15 @@ def inspect_draft(resolved_entities: dict, draft: NarrativeDraft) -> InspectionR
                 reason = (
                     f"{i + 1}번째 사건(\"{event.notes}\")이 하드체크에 위반됩니다: "
                     + "; ".join(c.reason for c in blocking)
+                )
+                return InspectionResult(approved=False, reason=reason, failed_event_index=i)
+
+        if event.event_type == "duration":
+            closure_conflict = hard_check.check_duration_closure_conflict(event.duration_effect)
+            if closure_conflict is not None:
+                reason = (
+                    f"{i + 1}번째 사건(\"{event.notes}\")이 하드체크에 위반됩니다: "
+                    f"{closure_conflict.reason}"
                 )
                 return InspectionResult(approved=False, reason=reason, failed_event_index=i)
 

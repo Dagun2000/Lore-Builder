@@ -90,6 +90,35 @@ def entity_field_summary(record: dict) -> str | None:
     return ", ".join(parts) if parts else None
 
 
+def _duration_range_note(related_event: dict) -> str | None:
+    """A short '(실제 기간: 2085년~2090년, 이미 종료됨)' fact for a duration-type
+    related event, computed directly from its stored start_year/end_year —
+    shown regardless of what the record's own `notes` text says.
+
+    `notes` is free prose written once (by a person or the LLM) and never
+    re-synced when a field like end_year is edited afterward independently
+    (e.g. through the GUI field editor) — a record seeded as "2085년부터
+    수감된 상태다" stays exactly that text forever even after its end_year
+    is set to 2090 later. A context builder that only ever surfaces notes
+    text has no way to know the record was actually closed at all, and an
+    LLM asked to draft what happens next has nothing to contradict, so it
+    invents its own answer instead of reading a real one that was already
+    on file (caught in practice: Creator drafting a brand new "released in
+    2086" event for a status whose real, already-set end_year was 2090).
+    Appending the actual field values as plain text closes that gap
+    without depending on notes ever being kept in sync."""
+    if not related_event.get("entity"):
+        return None
+    start = related_event.get("start_year")
+    end = related_event.get("end_year")
+    if start is None and end is None:
+        return None
+    start_label = start if start is not None else "?"
+    if end is not None:
+        return f"(실제 기간: {start_label}년~{end}년, 이미 종료됨)"
+    return f"(실제 기간: {start_label}년~, 현재까지 진행 중)"
+
+
 def _status_effect_notes_map() -> dict:
     """{predicate_id: notes} for every status_effects.yaml entry that has
     notes set — not cached beyond schema.load_status_effects' own
@@ -211,12 +240,15 @@ def _entity_context_lines(
         # `relationship` was retired, event_ids/get_events_for_entity is the
         # only remaining path to that text, and this check never read it.
         for related_event in storage.get_events_for_entity(entity_id):
-            if not related_event.get("notes"):
+            range_note = _duration_range_note(related_event)
+            if not related_event.get("notes") and not range_note:
                 continue
             already_closed = closed_predicates and (entity_id, related_event.get("predicate")) in closed_predicates
             annotation = None if already_closed else _duration_activity_annotation(related_event, event_year)
             prefix = f"{annotation} " if annotation else ""
-            line = f"{entity_id}의 관련 기록({related_event['id']}): {prefix}{related_event['notes']}"
+            line = f"{entity_id}의 관련 기록({related_event['id']}): {prefix}{related_event['notes'] or ''}"
+            if range_note:
+                line += f" {range_note}"
             # Phase 10 patch 22 follow-up 3: the predicate's own registered
             # meaning (status_effects.yaml's notes field), when set, is
             # appended here regardless of active/inactive — this is what

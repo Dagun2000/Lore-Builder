@@ -7,7 +7,7 @@ from . import schema, storage
 
 @dataclass
 class Conflict:
-    check_type: str  # "terminal" | "lifespan"
+    check_type: str  # "terminal" | "lifespan" | "duration_closure"
     severity: str  # "blocking" | "warning"
     entity_id: str
     reason: str
@@ -137,6 +137,50 @@ def check_lifespan_violation(
             reason=reason,
         )
 
+    return None
+
+
+def check_duration_closure_conflict(duration_effect: dict | None) -> Conflict | None:
+    """A `clear`/`set_closed` duration_effect proposes ending an (entity,
+    predicate, target) status/relationship at some end_year — if a
+    matching record in storage is already closed for real (its own
+    end_year already set), the proposed end_year must agree with it.
+
+    This exists because an LLM contradiction check was tried first and
+    didn't hold: rag_check's context now spells out a record's real
+    "(실제 기간: 2085년~2090년, 이미 종료됨)" explicitly, right next to the
+    record's own notes, and a fictional new event closing the same status
+    at a *different* year (e.g. 2086) still sailed through — the model
+    just didn't connect the two. A plain field comparison in code doesn't
+    have that failure mode; it either matches or it doesn't."""
+    if not duration_effect:
+        return None
+    if duration_effect.get("action") not in ("clear", "set_closed"):
+        return None
+    entity_id = duration_effect.get("entity")
+    predicate = duration_effect.get("predicate")
+    proposed_end = duration_effect.get("end_year")
+    if not entity_id or not predicate or proposed_end is None:
+        return None
+    target = duration_effect.get("target")
+
+    for event in storage.get_events_for_entity(entity_id):
+        if event.get("entity") != entity_id or event.get("predicate") != predicate:
+            continue
+        if event.get("target") != target:
+            continue
+        existing_end = event.get("end_year")
+        if existing_end is not None and existing_end != proposed_end:
+            return Conflict(
+                check_type="duration_closure",
+                severity="blocking",
+                entity_id=entity_id,
+                reason=(
+                    f"{entity_id}의 '{predicate}' 상태/관계는 이미 {existing_end}년에 종료된 "
+                    f"것으로 기록되어 있습니다 ({event['id']}). {proposed_end}년 종료로 다시 "
+                    f"닫을 수 없습니다."
+                ),
+            )
     return None
 
 

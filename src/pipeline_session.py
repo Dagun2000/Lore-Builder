@@ -619,6 +619,10 @@ def _pipeline_generator(session: PipelineSession):
                     )
                     if candidate_conflict is not None:
                         conflicts.append(candidate_conflict)
+
+    closure_conflict = hard_check.check_duration_closure_conflict(inferred_event.duration_effect)
+    if closure_conflict is not None:
+        conflicts.append(closure_conflict)
     session.hard_check_conflicts = conflicts
 
     ok = yield from _review_hard_check_conflicts_gen(conflicts)
