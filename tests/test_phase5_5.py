@@ -21,9 +21,9 @@ def test_new_character_name_prompt_defaults_to_tag_but_cannot_be_cleared(
     monkeypatch,
 ):
     # Enter accepts the tag itself as the default name (per spec's own
-    # worked example: '이름 (기본값: "쟝", Enter로 그대로 사용...)').
+    # worked example: '이름 (기본값: "데이비드", Enter로 그대로 사용...)').
     monkeypatch.setattr(mapping, "_prompt", lambda message: "")
-    assert mapping._prompt_name("쟝") == "쟝"
+    assert mapping._prompt_name("데이비드") == "데이비드"
 
     # But name is required:true — once a value exists, clearing it back to
     # empty through the free-form field review is rejected exactly like any
@@ -33,14 +33,14 @@ def test_new_character_name_prompt_defaults_to_tag_but_cannot_be_cleared(
     name_index = next(
         i for i, f in enumerate(field_defs, start=1) if f["name"] == "name"
     )
-    responses = iter([str(name_index), "", str(name_index), "쟝2", ""])
+    responses = iter([str(name_index), "", str(name_index), "데이비드2", ""])
     monkeypatch.setattr(mapping, "_prompt", lambda message: next(responses))
 
     fields = mapping._collect_fields(
-        "character", preset={"name": "쟝"}, allow_optional_review=True
+        "character", preset={"name": "데이비드"}, allow_optional_review=True
     )
 
-    assert fields["name"] == "쟝2"
+    assert fields["name"] == "데이비드2"
 
 
 def test_find_existing_matches_uses_name_field_for_char_미라():

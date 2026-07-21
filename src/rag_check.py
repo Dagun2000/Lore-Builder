@@ -40,6 +40,28 @@ def _extract_json(raw: str) -> dict:
     return json.loads(match.group(0))
 
 
+def _invoke_llm_json(prompt: str, tier: str = "reasoning", attempts: int = 2) -> dict:
+    """_invoke_llm + _extract_json, retried up to `attempts` times on a
+    parse failure. Every check in this file used to call the two back to
+    back with no retry, so a single malformed/truncated LLM response
+    (rare, but not zero-probability — a stray sentence around the JSON, a
+    response cut off at a token limit) raised straight through as an
+    uncaught exception, crashing whatever GUI/CLI flow was running it.
+    inference.py's infer_event already had this exact retry shape; this
+    generalizes it here instead of every caller reimplementing its own
+    copy. Raises the last ValueError if every attempt still fails — a
+    persistent problem still surfaces clearly, it just isn't given up on
+    after one unlucky response."""
+    last_error = None
+    for _ in range(attempts):
+        raw = _invoke_llm(prompt, tier=tier)
+        try:
+            return _extract_json(raw)
+        except ValueError as exc:
+            last_error = exc
+    raise last_error
+
+
 # ---------------------------------------------------------------------------
 # 2-1. RAG retrieval
 # ---------------------------------------------------------------------------
@@ -140,7 +162,7 @@ def _duration_activity_annotation(related_event: dict, event_year: int) -> str |
     telling the LLM not to treat a [비활성]-tagged record as contradiction
     grounds) was removed — it correctly suppressed false positives against
     a status/relationship that hadn't started yet, but the same suppression
-    also silently defeated a genuinely load-bearing case: "미라와 쟝은
+    also silently defeated a genuinely load-bearing case: "미라와 데이비드는
     2079년에 처음 만났다" (start_year=2079) is a boundary fact that rules
     out anything involving both of them before 2079, and got waved off as
     "그 사건 시점에는 적용되지 않는다" for a 2050 input that directly
@@ -190,9 +212,9 @@ def _entity_context_lines(
     happened yet" (relative to what's being checked) can't be the source of
     a contradiction. Rolled back (patch 21) — that's only true when the
     later point event is causally independent of the earlier one. It's
-    false for a boundary fact: "쟝과 미라가 2079년에 처음 만났다" (a point
+    false for a boundary fact: "데이비드와 미라가 2079년에 처음 만났다" (a point
     event) *constrains* what could have happened earlier, and inserting
-    "2050년에 쟝과 미라가 함께 놀았다" went through unchallenged because the
+    "2050년에 데이비드와 미라가 함께 놀았다" went through unchallenged because the
     2079 meeting was excluded from context for being "in the future" of the
     2050 event being checked — exactly backwards. Every point event's notes
     stay in context regardless of year again; only duration records get the
@@ -206,8 +228,8 @@ def _entity_context_lines(
     additive-only for the normal chat pipeline.
 
     `closed_predicates` (Phase 10 patch 22 follow-up): a set of
-    (entity_id, predicate) pairs that a caller knows have already been
-    closed by an earlier-in-this-same-batch event, even though storage
+    (entity_id, predicate, target) triples that a caller knows have already
+    been closed by an earlier-in-this-same-batch event, even though storage
     itself still shows the record open (nothing's saved yet). Without this,
     a still-open DB record kept getting its confirmatory [활성] tag even
     after Creator had already drafted the `clear` event ending it earlier in
@@ -216,6 +238,12 @@ def _entity_context_lines(
     in extra_context. Matching records are annotated as if not active
     (patch 21's plain, untagged treatment), not dropped — the fact itself
     still carries full weight, just without the misleading confirmatory tag.
+    Target is part of the key, not just (entity_id, predicate) — the same
+    predicate can be open toward multiple different targets at once (X
+    friends with both A and B), and closing X-A must never also suppress
+    X-B's own still-genuinely-active tag (caught via direct repro, same
+    family of bug as hard_check.check_duration_closure_conflict conflating
+    separate episodes of the same predicate).
 
     Deduped by event id (token-diet pass): two involved entities that share
     most of their history used to each print every shared event in full
@@ -275,7 +303,7 @@ def _entity_context_lines(
         record_entity = related_event.get("entity")
         already_closed = bool(
             closed_predicates and record_entity
-            and (record_entity, related_event.get("predicate")) in closed_predicates
+            and (record_entity, related_event.get("predicate"), related_event.get("target")) in closed_predicates
         )
         annotation = None if already_closed else _duration_activity_annotation(related_event, event_year)
         prefix = f"{annotation} " if annotation else ""
@@ -352,8 +380,7 @@ def check_rule_violation(
         "위 JSON 형식으로만 답하고 다른 텍스트는 출력하지 마라."
     )
 
-    raw = _invoke_llm(prompt)
-    data = _extract_json(raw)
+    data = _invoke_llm_json(prompt)
     if not data.get("violation"):
         print("[rag_check] check_rule_violation: 위반 없음")
         return None
@@ -438,8 +465,7 @@ def check_notes_conflict(
         "위 JSON 형식으로만 답하고 다른 텍스트는 출력하지 마라."
     )
 
-    raw = _invoke_llm(prompt)
-    data = _extract_json(raw)
+    data = _invoke_llm_json(prompt)
     if not data.get("conflict"):
         print("[rag_check] check_notes_conflict: 모순 없음")
         return None
@@ -555,8 +581,7 @@ def check_rule_and_notes(
         "}\n"
     )
 
-    raw = _invoke_llm(prompt)
-    data = _extract_json(raw)
+    data = _invoke_llm_json(prompt)
     judgments = []
 
     rule_data = data.get("rule_violation") or {}
@@ -652,8 +677,7 @@ def check_status_consistency(entities: list, raw_text: str, event_year: int) -> 
     # rule reasoning involved. Worth testing against real status-heavy
     # scenes (imprisoned, incapacitated, ...) before trusting it broadly —
     # a weaker model could plausibly miss a subtler case.
-    raw = _invoke_llm(prompt, tier="simple")
-    data = _extract_json(raw)
+    data = _invoke_llm_json(prompt, tier="simple")
     items = data.get("results") or []
 
     judgments = []

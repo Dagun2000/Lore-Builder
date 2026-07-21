@@ -135,7 +135,7 @@ def test_run_hard_checks_on_location_does_not_crash_and_skips_lifespan():
     storage.save_entity(
         "location",
         "loc_t10_ruin",
-        {"category": "ruins", "founded_year": 1000, "destroyed_year": 1200},
+        {"category": "폐허", "founded_year": 1000, "destroyed_year": 1200},
     )
     _link_event("loc_t10_ruin", "event_t10_late", 1300)
 
@@ -147,7 +147,7 @@ def test_run_hard_checks_on_location_does_not_crash_and_skips_lifespan():
 
 def test_run_hard_checks_on_faction_returns_empty_when_no_violations():
     storage.save_entity(
-        "faction", "faction_t11_calm", {"category": "kingdom", "founded_year": 1000}
+        "faction", "faction_t11_calm", {"category": "왕국", "founded_year": 1000}
     )
 
     assert hard_check.run_hard_checks("faction", "faction_t11_calm") == []

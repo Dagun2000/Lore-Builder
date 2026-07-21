@@ -322,7 +322,7 @@ def test_save_and_continue_forces_required_but_skips_optional_fields():
             required_field_prompts += 1
             field_names = {f["name"] for f in session.pending_decision.payload["fields"]}
             assert field_names == {"category"}  # the one still-missing required field
-            response = {"category": "tribe"}
+            response = {"category": "부족"}
         elif dt in ("hard_check_warning", "rag_judgment"):
             response = "그래도 저장"
         else:
@@ -340,7 +340,7 @@ def test_save_and_continue_forces_required_but_skips_optional_fields():
     entity_id = session.result["resolved_entities"]["그림자단"]
     entity = storage.get_entity("faction", entity_id)
     assert entity["name"] == "그림자단"
-    assert entity["category"] == "tribe"
+    assert entity["category"] == "부족"
     assert entity.get("disbanded_year") is None  # optional, correctly left blank
 
 

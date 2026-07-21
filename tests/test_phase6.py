@@ -91,7 +91,7 @@ def test_update_field_flow_race_triggers_both_tracks(monkeypatch):
             "notes": "단명종2는 절대 받아주지 않는다.",
         },
     )
-    storage.save_entity("faction", "faction_p6_d", {"name": "단명종반대", "category": "tribe"})
+    storage.save_entity("faction", "faction_p6_d", {"name": "단명종반대", "category": "부족"})
     storage.add_event_pointer("char_p6_d", "event_p6_d_rejection")
     storage.add_event_pointer("faction_p6_d", "event_p6_d_rejection")
 

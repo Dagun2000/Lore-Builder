@@ -16,13 +16,21 @@ Two independent tracks, both triggered by update_field_flow, never just one:
 
 Phase 10 patch 8 adds a third track, find_relevant_context, used by the GUI's
 field-edit screen instead of Track B: rather than dumping every event this
-entity is pointed at (noisy — a destroyed_year edit doesn't need to see the
-item's forging event), it walks one hop out to whichever *other* entities
-share an event with this one, and asks an LLM in a single batched call
-whether each candidate's own notes/fields look relevant to *this specific
+entity is pointed at unfiltered, it asks an LLM in a single batched call
+whether each of entity_id's own events looks relevant to *this specific
 edit*. Like Track B this only surfaces candidates for a human to look at —
 it is not a save-time contradiction verdict (that's still rag_check.
 check_notes_conflict, a separate call at a separate point in the pipeline).
+
+An earlier version of this search walked one hop out to whichever *other*
+entities shared an event with this one (a faction, a location, ...) instead
+of the events themselves — found lacking in practice: editing a character's
+own notes to drop a sentence about a past brawl surfaced the tavern it
+happened at as "related," which isn't wrong or stale in any way and isn't
+something there's anything to actually do about. The event describing
+exactly what's being removed is the only thing that's both genuinely
+inconsistent with the edit and actually actionable (edit or delete it), so
+that's what the candidate pool is now built from.
 """
 
 import json
@@ -157,28 +165,6 @@ def _extract_json(raw: str) -> dict:
     return json.loads(match.group(0))
 
 
-def _one_hop_entities(entity_id: str) -> set:
-    """Every other entity sharing an event with entity_id, deduplicated to
-    unique entities rather than counted per event (Phase 10 patch 8, 2-1) —
-    a character entangled with the same faction across a hundred events
-    still contributes that faction exactly once. Point events don't store
-    their own participant list, so who else is connected is only knowable
-    via the reverse lookup (storage.find_entities_referencing_event);
-    duration events already carry entity/target directly."""
-    connected = set()
-    for record in storage.get_events_for_entity(entity_id):
-        if record.get("year") is not None:  # point event
-            participants = [
-                eid for _category, eid in storage.find_entities_referencing_event(record["id"])
-            ]
-        else:  # duration event
-            participants = [record.get("entity"), record.get("target")]
-        for participant in participants:
-            if participant and participant != entity_id:
-                connected.add(participant)
-    return connected
-
-
 def _is_age_field(category: str, field_name: str) -> bool:
     """Only character birth_year/death_year carry an "age" meaning — a
     faction's founded_year or an artifact's created_year don't feed any
@@ -191,15 +177,31 @@ def _is_age_field(category: str, field_name: str) -> bool:
 
 
 def _notes_diff(old_text, new_text) -> str:
-    """The newly added/changed portion of a notes edit, not the whole
-    field (Phase 10 patch 8, 2-3) — the common case (appending a sentence)
-    is handled exactly; a full rewrite falls back to the whole new text
-    since there's no clean "added part" to isolate."""
+    """The specific part that changed, not the whole field (Phase 10 patch
+    8, 2-3) — handles the two common edit shapes precisely: appending a
+    sentence (old_text is a prefix/substring of new_text — return the
+    newly added remainder) and *removing* one (new_text is a substring of
+    old_text — return the removed portion itself). The removal case was
+    missing entirely at first: dropping a sentence from notes fell through
+    to the "return new_text" fallback, meaning the relevance search's
+    focus became whatever prose was left over, never the fact that was
+    actually just taken out — so the one thing genuinely inconsistent with
+    the edit (an event describing exactly what got removed) could never be
+    surfaced, no matter how relevant it actually was. A full rewrite
+    (neither contains the other) still falls back to the whole new text —
+    there's no clean single "changed part" to isolate there."""
     old_text = old_text or ""
     new_text = new_text or ""
     if old_text and old_text in new_text:
         remainder = new_text.replace(old_text, "", 1).strip()
         return remainder or new_text
+    if new_text in old_text:
+        # No truthy guard on new_text here (unlike the append branch above)
+        # — new_text == "" (notes cleared out entirely) is a real case and
+        # "" is trivially "in" anything, which is exactly the behavior
+        # wanted: the whole old_text comes back as what was removed.
+        removed = old_text.replace(new_text, "", 1).strip()
+        return removed or old_text
     return new_text
 
 
@@ -218,26 +220,47 @@ def _candidate_text(entity_id: str, include_fields: bool) -> str:
     return " / ".join(parts)
 
 
-def _judge_relevance(candidates: list, focus: str) -> set:
+def _judge_relevance(candidates: list, focus: str) -> list:
     """One batched LLM call comparing every candidate against `focus` at
     once (Phase 10 patch 8, 2-4) — never per-candidate, never a vector/
     embedding search, never a hardcoded synonym table. The same style of
     direct LLM comparison rag_check.check_notes_conflict already uses
     (which is why synonyms/rephrasings like "여성/여자/계집" work without
     ever being enumerated anywhere). Purely a "worth a human look" filter —
-    not a save-time contradiction verdict."""
+    not a save-time contradiction verdict.
+
+    Returns entity_ids in the order the model listed them (asked to rank
+    most-relevant-first), deduplicated and filtered to real candidates —
+    not a set. A set silently discarded whatever order the model's own
+    response carried, so even when the genuinely correct match was found,
+    it could land anywhere in the final displayed list instead of first
+    (caught in practice: the actually-correct match ranked 3rd of 4).
+
+    Tightened to favor precision over recall (an earlier version
+    explicitly told the model to include a candidate "even without
+    confidence, if there's even a little chance of relevance" — reasoning
+    that this is just a pre-filter for a human to review, not a final
+    verdict. In practice that produced noisy over-inclusion: candidates
+    with no real bearing on the edit still showed up alongside the one
+    genuine match. If the one clearly-relevant record has already been
+    deleted and nothing else is actually related, the correct result is
+    an empty list, not a forced best-effort guess.)"""
     candidates = [(eid, text) for eid, text in candidates if text]
     if not candidates:
-        return set()
+        return []
+    candidate_ids = {eid for eid, _ in candidates}
 
     block = "\n".join(f"- {eid}: {text}" for eid, text in candidates)
     prompt = (
         "너는 판타지 세계관 로어 데이터베이스의 보조 검색기다. 아래 후보 목록 중, 다음 "
-        f"기준과 관련이 있어 보이는 항목을 전부 골라라.\n\n기준: {focus}\n\n"
+        f"기준과 실제로 관련이 있는 항목만 골라라.\n\n기준: {focus}\n\n"
         f"후보 목록:\n{block}\n\n"
         "동의어나 표현이 달라도(예: '여성'과 '여자') 의미가 통하면 관련 있다고 판단하라. "
-        "확신이 없어도 조금이라도 관련 가능성이 있으면 포함시켜라 — 이건 최종 판단이 아니라 "
-        "사람이 검토할 후보를 추리는 것뿐이다.\n\n"
+        "하지만 명확한 연관이 없는 후보를 억지로 포함시키지 마라 — 조금이라도 관련 "
+        "가능성이 있다는 이유만으로 포함시키지 말고, 실제로 그 서술과 관련되거나 그 "
+        "서술로 인해 다시 검토가 필요한 항목만 골라라. 진짜로 관련된 항목이 하나도 없다면 "
+        "빈 배열을 반환하는 것이 맞는 답이다.\n\n"
+        "관련 있다고 고른 항목은 관련성이 높은 순서대로 나열하라.\n\n"
         '아래 JSON 형식으로만 답하라: {"relevant_entity_ids": ["entity_id", ...]}\n'
     )
     print(f"[field_update] 관련성 판단 후보 {len(candidates)}건, 기준: {focus}")
@@ -245,10 +268,16 @@ def _judge_relevance(candidates: list, focus: str) -> set:
         data = _extract_json(_invoke_llm(prompt))
     except Exception as exc:
         print(f"[field_update] 관련성 판단 실패, 빈 결과로 처리: {exc}")
-        return set()
-    relevant_ids = set(data.get("relevant_entity_ids") or [])
-    print(f"[field_update] 관련성 판단 결과: {sorted(relevant_ids) or '(없음)'}")
-    return relevant_ids
+        return []
+    raw_ids = data.get("relevant_entity_ids") or []
+    seen = set()
+    ordered_ids = []
+    for eid in raw_ids:
+        if eid in candidate_ids and eid not in seen:
+            seen.add(eid)
+            ordered_ids.append(eid)
+    print(f"[field_update] 관련성 판단 결과: {ordered_ids or '(없음)'}")
+    return ordered_ids
 
 
 def find_relevant_context(entity_id: str, field_name: str, new_value) -> list:
@@ -260,16 +289,18 @@ def find_relevant_context(entity_id: str, field_name: str, new_value) -> list:
         rename is a "find the frozen-in-prose old string" problem, not a
         "does this fact still hold" problem.
       - notes: only the newly added/changed portion is searched, against
-        every 1-hop entity's fields *and* notes (prose can contradict any
-        settled fact).
+        entity_id's own events (prose can contradict any of them).
       - an age field (character birth/death year): the existing hard check
-        is untouched; this *additionally* searches 1-hop notes for an
-        age/time-related mention, since "must be over 100 years old" is a
-        prose constraint no deterministic check can catch.
-      - anything else structured (gender, category, domain, ...): 1-hop
-        notes only, searched with both the old and new value — a rule
-        like "남성만 있는 형제단" would otherwise be missed when flipping
-        gender away from the value the rule was written against.
+        is untouched; this *additionally* searches entity_id's own events
+        for an age/time-related mention, since "must be over 100 years
+        old" is a prose constraint no deterministic check can catch.
+      - anything else structured (gender, category, domain, ...):
+        entity_id's own events, searched with both the old and new value —
+        a rule like "남성만 있는 형제단" would otherwise be missed when
+        flipping gender away from the value the rule was written against.
+
+    Candidates are always entity_id's own timeline events, never the other
+    entities that happen to share them — see the module docstring for why.
     """
     category = schema.category_from_id(entity_id)
     if category is None:
@@ -286,24 +317,44 @@ def find_relevant_context(entity_id: str, field_name: str, new_value) -> list:
                 matches.append(RelevantMatch(entity_id=record["id"], reason=notes))
         return matches
 
-    one_hop = _one_hop_entities(entity_id)
+    # Candidates are entity_id's own timeline events, not the other
+    # entities that happen to share them (Phase 10 patch 8 originally
+    # searched one-hop *entities* here; found lacking in practice — editing
+    # 데이비드's own notes to drop "검은 염소 주점에서 휘말렸다" has nothing
+    # actionable to do with loc_검은_염소_주점 itself, which isn't wrong or
+    # stale in any way. The thing that's actually now inconsistent with the
+    # edited fact, and the only thing there's anything to actually do about
+    # (edit or delete it), is event_데이비드_2080 itself — the record describing
+    # exactly what's being removed). The relevance judgment step already
+    # filters out noise (an unrelated event stays unrelated); the bug was
+    # that events were never even candidates to begin with, so the
+    # obviously-relevant one could never be picked regardless.
+    # A list, not a set — get_events_for_entity is already year-sorted, and
+    # throwing that away for no reason was one half of why the final
+    # displayed order ended up arbitrary (see _judge_relevance for the
+    # other half).
+    own_event_ids = [record["id"] for record in storage.get_events_for_entity(entity_id)]
 
     if field_name == "notes":
         diff = _notes_diff(previous_value, new_value)
         focus = f'"{diff}"라는 서술과 관련되거나 모순될 수 있는 내용'
-        candidates = [(eid, _candidate_text(eid, include_fields=True)) for eid in one_hop]
+        candidates = [(eid, _candidate_text(eid, include_fields=True)) for eid in own_event_ids]
     elif _is_age_field(category, field_name):
         focus = _AGE_FOCUS_DESCRIPTION
-        candidates = [(eid, _candidate_text(eid, include_fields=False)) for eid in one_hop]
+        candidates = [(eid, _candidate_text(eid, include_fields=False)) for eid in own_event_ids]
     else:
         focus = f'"{previous_value}" 또는 "{new_value}"와(과) 관련되거나 전제로 하는 규칙/서술'
-        candidates = [(eid, _candidate_text(eid, include_fields=False)) for eid in one_hop]
+        candidates = [(eid, _candidate_text(eid, include_fields=False)) for eid in own_event_ids]
 
     relevant_ids = _judge_relevance(candidates, focus)
+    # relevant_ids is already in the model's own most-relevant-first order
+    # (see _judge_relevance) — iterate it directly rather than filtering
+    # `candidates` in its own (unrelated) order, which is what silently
+    # discarded that ranking before.
+    text_by_id = dict(candidates)
     return [
-        RelevantMatch(entity_id=eid, reason=text)
-        for eid, text in candidates
-        if eid in relevant_ids
+        RelevantMatch(entity_id=eid, reason=text_by_id[eid])
+        for eid in relevant_ids
     ]
 
 

@@ -62,7 +62,7 @@ location:
       required: true
     - name: category
       type: enum
-      options: [kingdom, city, ruins, wilderness, dungeon, tavern]
+      options: [왕국, 도시, 폐허, 황무지, 던전, 주점]
       required: true
     - name: founded_year
       type: integer
@@ -89,7 +89,7 @@ faction:
       required: true
     - name: category
       type: enum
-      options: [mercenary_guild, kingdom, religious_order, tribe]
+      options: [용병단, 왕국, 종교단체, 부족]
       required: true
     - name: founded_year
       type: integer
@@ -205,7 +205,7 @@ system:
       required: true
     - name: domain
       type: enum
-      options: [magic, divine, artifact_law, physics]
+      options: [마법, 신성, 유물법칙, 물리]
       required: true
     - name: hard_rule
       type: boolean

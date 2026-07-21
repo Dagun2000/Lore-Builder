@@ -45,10 +45,10 @@ def test_chroma_save_and_query():
     assert "char_test_chroma" in found_ids
 
 
-def test_get_event_years_for_char_쟝():
-    # char_쟝's seeded event_ids span: event_쟝_2080 (2080),
-    # event_쟝_수감 (2085), event_쟝_용병_길드_가입 (start 2070),
-    # event_쟝_수감_상태 (start 2085), event_미라_쟝_지인
+def test_get_event_years_for_char_데이비드():
+    # char_데이비드's seeded event_ids span: event_데이비드_2080 (2080),
+    # event_데이비드_수감 (2085), event_데이비드_용병_길드_가입 (start 2070),
+    # event_데이비드_수감_상태 (start 2085), event_미라_데이비드_지인
     # (start 2079) — get_event_years collects every year+start_year+end_year
     # across all of them.
-    assert storage.get_event_years("char_쟝") == [2070, 2079, 2080, 2085]
+    assert storage.get_event_years("char_데이비드") == [2070, 2079, 2080, 2085]

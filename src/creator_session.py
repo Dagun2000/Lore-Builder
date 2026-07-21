@@ -152,6 +152,17 @@ def _save_draft(resolved_entities: dict, draft) -> list:
     own same-call pointer-merging (existing_ids/pointer_targets) to span
     across separate calls, which it was never built to do."""
     applied = []
+    # Every entity_id/body/metadata needing a Chroma document, saved in one
+    # batched call at the very end instead of one save_to_chroma call per
+    # item as it's produced — measured, not assumed: N sequential calls
+    # scale linearly (~0.3s+ of local embedding computation each) and
+    # dominate how long a multi-event Creator save takes, while the same N
+    # documents batched into one upsert call measured ~3.5x faster (see
+    # storage.save_to_chroma_batch). SQLite writes stay sequential and
+    # inline below, unaffected — a later event's diff still needs an
+    # earlier event's pointer already merged into storage via get_entity/
+    # get_events_for_entity, which Chroma plays no part in.
+    chroma_items = []
 
     # New entities (Phase 10 patch 22, B) are created first, with their own
     # real fields (name, notes, any required enum) — storage.save_entity is
@@ -162,8 +173,8 @@ def _save_draft(resolved_entities: dict, draft) -> list:
     for new_entity in draft.new_entities:
         storage.save_entity(new_entity.category, new_entity.entity_id, new_entity.fields)
         if new_entity.fields.get("notes"):
-            storage.save_to_chroma(
-                new_entity.entity_id, new_entity.fields["notes"], {"category": new_entity.category}
+            chroma_items.append(
+                (new_entity.entity_id, new_entity.fields["notes"], {"category": new_entity.category})
             )
         applied.append(
             archivist.ChangeItem(
@@ -205,8 +216,10 @@ def _save_draft(resolved_entities: dict, draft) -> list:
         for item in diff:
             storage.save_entity(item.category, item.entity_id, item.fields)
             if item.body:
-                storage.save_to_chroma(item.entity_id, item.body, {"category": item.category})
+                chroma_items.append((item.entity_id, item.body, {"category": item.category}))
             applied.append(item)
+
+    storage.save_to_chroma_batch(chroma_items)
     return applied
 
 
@@ -238,7 +251,7 @@ def _apply_year_edits(draft, edits: dict) -> None:
     """`edits`: {event_index (int or str): {"year": .. } or {"start_year": .., "end_year": ..}}.
 
     Creator's generated notes almost always spell the year out in the prose
-    itself ("2080년, 쟝과 미라는..."), since that's what makes the sentence
+    itself ("2080년, 데이비드와 미라는..."), since that's what makes the sentence
     checkable at all. Re-inspection (the caller always re-runs Inspector
     after an edit) reasons over that prose text, not the structured year
     field in isolation — so if only the number is updated and the old year
@@ -460,6 +473,17 @@ def _advance(session: CreatorSession, send_value=None, is_start: bool = False) -
         session.result = result
         session.pending_decision = None
         session.stage = "done" if result.get("status") == "saved" else "aborted"
+        return session
+    except ValueError as exc:
+        # compose_narrative raises after exhausting its own retries against
+        # a persistently hallucinated/invalid entity reference — rare (two
+        # bad responses in a row), but with no catch here it would surface
+        # as a raw traceback instead of a clean, actionable message, the
+        # same class of failure Fix 1 (rag_check/creator's
+        # _invoke_llm_json retry) addressed for malformed JSON specifically.
+        session.result = {"status": "error", "stage": "compose", "message": str(exc)}
+        session.pending_decision = None
+        session.stage = "aborted"
         return session
 
     session.pending_decision = pending

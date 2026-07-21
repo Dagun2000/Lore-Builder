@@ -8,10 +8,10 @@ from src import inference, rag_check
 
 
 def test_infer_event_basic_point_event():
-    resolved = {"쟝": "char_쟝", "검은 산양 여관": "loc_검은_염소_주점"}
+    resolved = {"데이비드": "char_데이비드", "검은 산양 여관": "loc_검은_염소_주점"}
 
     result = inference.infer_event(
-        resolved, "쟝이 검은 산양 여관에서 얻어맞았다.", [2100]
+        resolved, "데이비드가 검은 산양 여관에서 얻어맞았다.", [2100]
     )
 
     assert result.is_single_event
@@ -22,10 +22,10 @@ def test_infer_event_basic_point_event():
 
 
 def test_check_status_consistency_detects_clear():
-    # char_쟝's seeded "imprisoned" range starts 2085, still open — 2100
+    # char_데이비드's seeded "imprisoned" range starts 2085, still open — 2100
     # falls inside it, so this is a genuine gated-in case.
     judgments = rag_check.check_status_consistency(
-        ["char_쟝"], "쟝이 탈출해서 마을로 도망쳤다.", 2100
+        ["char_데이비드"], "데이비드가 탈출해서 마을로 도망쳤다.", 2100
     )
 
     assert any(j.type == "clears_status" for j in judgments)
@@ -33,7 +33,7 @@ def test_check_status_consistency_detects_clear():
 
 def test_check_status_consistency_detects_conflict():
     judgments = rag_check.check_status_consistency(
-        ["char_쟝"], "쟝이 수감 중에 전장에서 검을 휘둘렀다.", 2100
+        ["char_데이비드"], "데이비드가 수감 중에 전장에서 검을 휘둘렀다.", 2100
     )
 
     assert any(j.type == "conflict" for j in judgments)
@@ -73,8 +73,8 @@ def test_check_rule_and_notes_combined_still_detects_notes_conflict():
 
 
 def test_no_false_positives_for_mundane_event():
-    # Uses char_미라 (no active status_effect) rather than char_쟝, since
-    # char_쟝 carries an unresolved "imprisoned" status from the seed data
+    # Uses char_미라 (no active status_effect) rather than char_데이비드, since
+    # char_데이비드 carries an unresolved "imprisoned" status from the seed data
     # used by the two tests above — that would make "took a walk" a genuinely
     # ambiguous case for check_status_consistency, not a clean no-op baseline.
     raw_text = "미라가 마을을 산책했다."

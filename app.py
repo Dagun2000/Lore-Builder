@@ -836,12 +836,28 @@ def _render_entity_link(entity_id: str, key: str) -> None:
         st.rerun()
 
 
+def _entity_exists(entity_id: str) -> bool:
+    category = schema.category_from_id(entity_id)
+    return bool(category and storage.get_entity(category, entity_id))
+
+
 def _render_entity_fields(category: str, entity_id: str, entity: dict) -> None:
     """Replaces the old raw st.json(entity) dump (Phase 10 patch 20):
     reference fields (race, location, ...) and event_ids become clickable
     navigation buttons via _render_entity_link, everything else is plain
     "필드명: 값" text. Empty/null fields are skipped, same as st.json would
-    implicitly show them (as null) but with no more useful information."""
+    implicitly show them (as null) but with no more useful information.
+
+    event_ids is filtered to entries that still resolve to a real stored
+    record before rendering. A dangling pointer (the record it points at
+    was deleted without this entity's own event_ids being updated to
+    match — e.g. a hand-edited seed file, since nothing auto-syncs those,
+    see the README's "editing the seed world" section) would otherwise
+    still render as a clickable button showing nothing but its own raw
+    id, since _entity_display_label falls back to that rather than
+    erroring. That fallback is the right behavior for a single reference
+    field, but a whole redundant, meaningless entry in a list is better
+    just not shown at all."""
     for field_def in schema.get_fields(category):
         name = field_def["name"]
         value = entity.get(name)
@@ -852,8 +868,11 @@ def _render_entity_fields(category: str, entity_id: str, entity: dict) -> None:
             st.write(f"**{name}**")
             _render_entity_link(value, key=f"reflink_{entity_id}_{name}")
         elif name == "event_ids":
-            st.write(L("**{0}** ({1}건)").format(name, len(value)))
-            for i, eid in enumerate(value):
+            live_ids = [eid for eid in value if _entity_exists(eid)]
+            if not live_ids:
+                continue
+            st.write(L("**{0}** ({1}건)").format(name, len(live_ids)))
+            for i, eid in enumerate(live_ids):
                 _render_entity_link(eid, key=f"reflink_{entity_id}_{name}_{i}")
         else:
             st.write(f"**{name}**: {value}")

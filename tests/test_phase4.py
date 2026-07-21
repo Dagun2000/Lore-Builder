@@ -11,14 +11,14 @@ from src.parser import ParsedInput
 def test_build_diff_point_event_adds_pointers_to_every_involved_entity():
     parsed = ParsedInput(
         years=[2100],
-        tags=["쟝", "검은 산양 여관"],
-        raw_text="쟝이 검은 산양 여관에서 얻어맞았다.",
+        tags=["데이비드", "검은 산양 여관"],
+        raw_text="데이비드가 검은 산양 여관에서 얻어맞았다.",
     )
-    resolved = {"쟝": "char_쟝", "검은 산양 여관": "loc_검은_염소_주점"}
+    resolved = {"데이비드": "char_데이비드", "검은 산양 여관": "loc_검은_염소_주점"}
     inferred = InferredEvent(
         event_type="point",
-        event_summary="쟝이 검은 산양 여관에서 얻어맞았다.",
-        involved_entities=["char_쟝", "loc_검은_염소_주점"],
+        event_summary="데이비드가 검은 산양 여관에서 얻어맞았다.",
+        involved_entities=["char_데이비드", "loc_검은_염소_주점"],
     )
 
     diff = archivist.build_diff(parsed, resolved, inferred)
@@ -31,8 +31,8 @@ def test_build_diff_point_event_adds_pointers_to_every_involved_entity():
     assert timeline_creates[0].fields["location"] == "loc_검은_염소_주점"
     timeline_id = timeline_creates[0].entity_id
 
-    assert "char_쟝" in pointer_updates
-    assert timeline_id in pointer_updates["char_쟝"].fields["event_ids"]
+    assert "char_데이비드" in pointer_updates
+    assert timeline_id in pointer_updates["char_데이비드"].fields["event_ids"]
     assert "loc_검은_염소_주점" in pointer_updates
     assert timeline_id in pointer_updates["loc_검은_염소_주점"].fields["event_ids"]
 
@@ -102,21 +102,21 @@ def test_build_diff_duration_clear_with_no_open_record_returns_confirmation_need
 def test_generate_id_avoids_collision():
     existing = set()
 
-    first = archivist.generate_id("timeline", "쟝이 아주 새로운 사건에 휘말렸다", existing)
+    first = archivist.generate_id("timeline", "데이비드가 아주 새로운 사건에 휘말렸다", existing)
     existing.add(first)
-    second = archivist.generate_id("timeline", "쟝이 아주 새로운 사건에 휘말렸다", existing)
+    second = archivist.generate_id("timeline", "데이비드가 아주 새로운 사건에 휘말렸다", existing)
 
     assert first != second
     assert second == f"{first}_2"
 
 
 def test_duration_set_always_creates_new_timeline_record():
-    parsed = ParsedInput(years=[2100], tags=["쟝"], raw_text="쟝이 은빛도시와 적대하게 됐다.")
-    resolved = {"쟝": "char_쟝"}
+    parsed = ParsedInput(years=[2100], tags=["데이비드"], raw_text="데이비드가 은빛도시와 적대하게 됐다.")
+    resolved = {"데이비드": "char_데이비드"}
     inferred = InferredEvent(
         event_type="duration",
         duration_effect={
-            "entity": "char_쟝",
+            "entity": "char_데이비드",
             "predicate": "hostile_with",
             "target": "loc_은빛도시",
             "action": "set",
@@ -134,7 +134,7 @@ def test_duration_set_always_creates_new_timeline_record():
 
 def test_is_single_event_false_returns_confirmation_needed():
     parsed = ParsedInput(
-        years=[2080, 2200], tags=["쟝", "랄프"], raw_text="쟝이 2080년에 술을 마셨고, 랄프가 2200년에 죽었다."
+        years=[2080, 2200], tags=["데이비드", "랄프"], raw_text="데이비드가 2080년에 술을 마셨고, 랄프가 2200년에 죽었다."
     )
     inferred = InferredEvent(
         event_type="point",
@@ -142,7 +142,7 @@ def test_is_single_event_false_returns_confirmation_needed():
         ambiguity_reason="서로 다른 두 사건이 한 문장에 섞여 있습니다.",
     )
 
-    result = archivist.build_diff(parsed, {"쟝": "char_쟝", "랄프": "char_ralph"}, inferred)
+    result = archivist.build_diff(parsed, {"데이비드": "char_데이비드", "랄프": "char_ralph"}, inferred)
 
     assert isinstance(result, archivist.ConfirmationNeeded)
     assert result.reason == "서로 다른 두 사건이 한 문장에 섞여 있습니다."

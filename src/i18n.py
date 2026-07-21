@@ -43,7 +43,7 @@ _TRANSLATIONS: dict = {
         "Enter an event or fact with entities tagged in [ ] and a year "
         "(tag a new name to create it as a new entity)",
     "[ ]로 태그된 엔티티와 만들고 싶은 이야기를 입력하세요 "
-    "(예: [쟝]과 [미라]가 원수가 되는 이야기, 2100년에)":
+    "(예: [데이비드]와 [미라]가 원수가 되는 이야기, 2100년에)":
         "Enter the story you want, tagging entities with [ ] "
         "(e.g. [Jang] and [Mira] become enemies, in the year 2100)",
     "+ 조연 엔티티 생성 허용": "+ Allow new supporting entities",

@@ -203,7 +203,7 @@ class DraftEntity:
 
     entity_id: str
     category: str
-    fields: dict  # e.g. {"name": "밥", "notes": "...", "category": "mercenary_guild"}
+    fields: dict  # e.g. {"name": "밥", "notes": "...", "category": "용병단"}
 
 
 @dataclass
@@ -246,6 +246,21 @@ def _extract_json(raw: str) -> dict:
     return json.loads(match.group(0))
 
 
+def _invoke_llm_json(prompt: str, attempts: int = 2) -> dict:
+    """_invoke_llm + _extract_json, retried up to `attempts` times on a
+    parse failure — same reasoning and shape as rag_check._invoke_llm_json:
+    a malformed/truncated response used to raise straight through as an
+    uncaught exception instead of just being retried."""
+    last_error = None
+    for _ in range(attempts):
+        raw = _invoke_llm(prompt)
+        try:
+            return _extract_json(raw)
+        except ValueError as exc:
+            last_error = exc
+    raise last_error
+
+
 def _range_overlaps(e_lower, e_upper, lower: int, upper: int) -> bool:
     """False only when the two ranges are provably disjoint — None on
     either side of the entity's own range means unbounded in that
@@ -257,32 +272,52 @@ def _range_overlaps(e_lower, e_upper, lower: int, upper: int) -> bool:
     return True
 
 
-def _backdrop_entities_block(lower: int, upper: int) -> str:
+def _backdrop_entity_ids(lower: int, upper: int) -> dict:
+    """{entity_id: (label, category)} for every backdrop-category
+    (location/artifact/faction) entity whose own existence range
+    (hard_check.get_existence_range — founded/created_year ~
+    destroyed_year) overlaps [lower, upper] — the actual set of ids
+    Creator is shown as freely referenceable without tagging (see
+    _backdrop_entities_block, built from this same set). Shared with
+    compose_narrative's own reference validation: these entities are
+    legitimately usable without ever being tagged in the current request
+    (e.g. reusing loc_은빛도시_지하감옥 from an already-existing imprisonment
+    record tagged only in some earlier, separate request) — validating
+    against just resolved_entities/tag_to_id alone rejected exactly this
+    as if it were a hallucinated id, when it was a perfectly real,
+    intentionally-always-usable one (caught via direct repro, not
+    anticipated when the validation was first added).
+
+    Filtered by existence range for the same reason
+    _backdrop_entities_block always was: a destroyed-in-1200 location
+    still showing up as an option for a 2055-2059 story meant Creator kept
+    picking it, hard_check kept rejecting it, and every one of 4 retries
+    burned itself out on the same unwinnable choice. Filtering here means
+    it's never offered in the first place, the same "fix it before
+    Creator runs, not after" principle the year-window computation already
+    applies to characters."""
+    result = {}
+    for category in sorted(_BACKDROP_CATEGORIES & set(schema.list_categories())):
+        for e in storage.list_entities(category):
+            e_lower, e_upper = hard_check.get_existence_range(category, e["id"])
+            if not _range_overlaps(e_lower, e_upper, lower, upper):
+                continue
+            result[e["id"]] = (e.get("name") or e["id"], category)
+    return result
+
+
+def _backdrop_entities_block(backdrop_ids: dict) -> str:
     """Existing entities of the backdrop categories (location/artifact/
     faction) — shown so Creator can naturally reference them (Phase 10
     patch 22, B), same reasoning as the original location-only version this
     replaces: a duel referencing an existing named sword, or a scene set at
     an existing tavern, enriches a story without the narrative-agency risk
     an uninvited *character* would carry (see module-level comment on
-    _BACKDROP_CATEGORIES).
-
-    Filtered to entities whose own existence range (hard_check.
-    get_existence_range — founded/created_year ~ destroyed_year) actually
-    overlaps [lower, upper] — found in practice: a destroyed-in-1200
-    location still showed up as an option for a 2055-2059 story, so
-    Creator kept picking it, hard_check kept rejecting it, and every one of
-    4 retries burned itself out on the same unwinnable choice. Filtering
-    here means it's never offered in the first place, the same "fix it
-    before Creator runs, not after" principle the year-window computation
-    already applies to characters."""
-    lines = []
-    for category in sorted(_BACKDROP_CATEGORIES & set(schema.list_categories())):
-        for e in storage.list_entities(category):
-            e_lower, e_upper = hard_check.get_existence_range(category, e["id"])
-            if not _range_overlaps(e_lower, e_upper, lower, upper):
-                continue
-            label = e.get("name") or e["id"]
-            lines.append(f'- {e["id"]} ("{label}", {category})')
+    _BACKDROP_CATEGORIES)."""
+    lines = [
+        f'- {entity_id} ("{label}", {category})'
+        for entity_id, (label, category) in backdrop_ids.items()
+    ]
     return "\n".join(lines) if lines else "(등록된 항목 없음)"
 
 
@@ -300,7 +335,87 @@ def _new_entity_category_block(allowed_new_categories: set) -> str:
     return "\n".join(lines)
 
 
-def _resolve_new_entities(data: dict, allowed_new_categories: set) -> tuple:
+def _levenshtein(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    if not a or not b:
+        return max(len(a), len(b))
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        curr = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + (ca != cb))
+        prev = curr
+    return prev[-1]
+
+
+def _matching_tagged_entity(category: str, name: str, resolved_entities: dict) -> str | None:
+    """The real entity_id already tagged for this request whose own stored
+    name is the same as, or a 1-character hallucinated slip away from,
+    `name` — or None if nothing in resolved_entities is a plausible match.
+
+    Caught in practice: Creator, mid-draft, invented a brand-new "new_entities"
+    character named "쟩" — a single-final-consonant slip of "데이비드" (ㅇ vs ㄴ),
+    the SAME character the user had already tagged and resolved in this
+    exact request — creating a redundant near-duplicate entity instead of
+    just referencing the real one. Checking only against entities already
+    tagged for THIS request (not the whole world's entities of that
+    category) keeps this narrow: Creator has no legitimate reason to
+    "invent" a new character this similar to someone the user just
+    explicitly named a moment ago, so a match here is treated as the same
+    person, not two coincidentally similar strangers."""
+    for entity_id in resolved_entities.values():
+        if schema.category_from_id(entity_id) != category:
+            continue
+        record = storage.get_entity(category, entity_id)
+        existing_name = (record or {}).get("name")
+        if not existing_name:
+            continue
+        if existing_name == name or _levenshtein(existing_name, name) <= 1:
+            return entity_id
+    return None
+
+
+def _closest_valid_id(bad_id: str, valid_ids: set) -> str | None:
+    """The single valid id within edit-distance 1 of `bad_id`, if any —
+    the same "쟩 for the real 데이비드" tolerance _matching_tagged_entity applies
+    to a proposed new_entities name, generalized to any raw entity_id a
+    drafted event carries directly (duration_effect.entity/target,
+    involved_entities, location). Nothing stops that exact same
+    hallucination from showing up as a bare reference instead of a
+    new_entities proposal — caught in practice: a retry that no longer
+    invented a duplicate character still separately hallucinated
+    "char_쟩" straight into a duration_effect, which the reference
+    validation correctly rejected as unrecognized, but rejecting outright
+    (forcing a full recompose) is worse than just fixing an obvious
+    one-character slip in place."""
+    for candidate in valid_ids:
+        if _levenshtein(bad_id, candidate) <= 1:
+            return candidate
+    return None
+
+
+def _resolve_open_target(entity_id: str | None, predicate: str | None) -> str | None:
+    """The target of whatever (entity_id, predicate) record is currently
+    open in storage (end_year is None), if there's exactly one. Used to
+    fill in a clear/set_closed duration_effect's target when the LLM left
+    it null — only safe when unambiguous, so 0 or 2+ open matches return
+    None rather than guessing."""
+    if not entity_id or not predicate:
+        return None
+    open_targets = {
+        event.get("target")
+        for event in storage.get_events_for_entity(entity_id)
+        if event.get("entity") == entity_id
+        and event.get("predicate") == predicate
+        and event.get("end_year") is None
+    }
+    if len(open_targets) == 1:
+        return next(iter(open_targets))
+    return None
+
+
+def _resolve_new_entities(data: dict, allowed_new_categories: set, resolved_entities: dict) -> tuple:
     """Parses data["new_entities"], mints each a real entity_id immediately
     (archivist.generate_id — collision-checked against storage AND every id
     minted earlier in this same call, exactly how timeline ids within one
@@ -309,7 +424,13 @@ def _resolve_new_entities(data: dict, allowed_new_categories: set) -> tuple:
     Creator's own placeholder tags to real ids in one pass. Silently drops
     any entity whose category isn't in allowed_new_categories or is missing
     a name — Creator ignoring its own instructions shouldn't crash the
-    draft, just lose that one entity."""
+    draft, just lose that one entity.
+
+    Before minting anything, checks whether the proposed name is really
+    just a hallucinated near-duplicate of an entity already tagged this
+    request (see _matching_tagged_entity) — if so, the tag is remapped
+    straight to that real, existing entity_id instead of creating a
+    phantom duplicate character."""
     entities = []
     tag_to_id = {}
     existing_ids = set()
@@ -319,11 +440,64 @@ def _resolve_new_entities(data: dict, allowed_new_categories: set) -> tuple:
         fields = dict(raw.get("fields") or {})
         if not tag or category not in allowed_new_categories or not fields.get("name"):
             continue
+        duplicate_of = _matching_tagged_entity(category, fields["name"], resolved_entities)
+        if duplicate_of:
+            tag_to_id[tag] = duplicate_of
+            continue
         entity_id = archivist.generate_id(category, fields["name"], existing_ids)
         existing_ids.add(entity_id)
         tag_to_id[tag] = entity_id
         entities.append(DraftEntity(entity_id=entity_id, category=category, fields=fields))
     return entities, tag_to_id
+
+
+def _autopromote_undeclared_ids(
+    data: dict, allowed_new_categories: set, tag_to_id: dict, new_entities: list
+) -> None:
+    """Mutates tag_to_id/new_entities in place to cover a gap distinct from
+    _closest_valid_id's typo tolerance: the LLM sometimes invents a brand-new
+    entity id directly inside an event's location/involved_entities/
+    duration_effect fields (following the id_prefix convention it sees in
+    the existing-entity list, e.g. "loc_바람길_황무지") instead of declaring it
+    through the new_entities array the prompt asks for. That id isn't a
+    near-miss of any real id, so _autocorrect can't save it, and the whole
+    request failed outright even with the category's checkbox explicitly
+    checked (observed directly: 'location' checked, LLM still wrote a bare,
+    undeclared location id straight into event.location).
+
+    Only promotes an id whose schema.category_from_id lands in
+    allowed_new_categories (what the user actually opted into), that isn't
+    already a real stored entity (a real id merely filtered out of this
+    request's backdrop list — e.g. by the existence-window filter — should
+    still fail as an out-of-scope reference, not get silently duplicated
+    under a new id), and only up to the same MAX_NEW_ENTITIES budget
+    _resolve_new_entities enforces, so this can't smuggle in an unbounded
+    number of invented entities."""
+    existing_ids = set(tag_to_id.values())
+    seen_raw = set()
+    for e in data.get("events") or []:
+        duration_effect = e.get("duration_effect") or {}
+        refs = list(e.get("involved_entities") or [])
+        refs.append(e.get("location"))
+        refs.append(duration_effect.get("entity"))
+        refs.append(duration_effect.get("target"))
+        for ref in refs:
+            if not ref or not isinstance(ref, str) or ref in tag_to_id or ref in seen_raw:
+                continue
+            category = schema.category_from_id(ref)
+            if category not in allowed_new_categories:
+                continue
+            if storage.get_entity(category, ref) is not None:
+                continue
+            if len(new_entities) >= MAX_NEW_ENTITIES:
+                return
+            seen_raw.add(ref)
+            prefix = schema.load_schema_registry()[category]["id_prefix"]
+            name = ref[len(prefix):].replace("_", " ").strip() or ref
+            entity_id = archivist.generate_id(category, name, existing_ids)
+            existing_ids.add(entity_id)
+            tag_to_id[ref] = entity_id
+            new_entities.append(DraftEntity(entity_id=entity_id, category=category, fields={"name": name}))
 
 
 def _remap_tags(value, tag_to_id: dict):
@@ -437,7 +611,8 @@ def compose_narrative(
     # 얘기를 나누었다", "여명검을 휘둘렀다"), same as a person narrating a
     # scene would, without needing them tagged. character/race are
     # deliberately excluded here — see _BACKDROP_CATEGORIES.
-    backdrop_block = _backdrop_entities_block(lower, upper)
+    backdrop_ids = _backdrop_entity_ids(lower, upper)
+    backdrop_block = _backdrop_entities_block(backdrop_ids)
 
     new_entity_block = ""
     if allowed_new_categories:
@@ -525,12 +700,18 @@ def compose_narrative(
         "마지막에 duration 이벤트를 추가하라 — 여러 사건을 만든다고 항상 duration도 만들어야 "
         "하는 건 아니다. 예: 사랑 이야기라면 마지막에 연인 관계 duration을 추가하는 게 자연스럽지만, "
         "단순히 바보짓을 하는 이야기라면 point만으로 완결되고 duration은 불필요하다.\n\n"
+        "위 '엔티티의 관련 기록'에서 실제 기간이 이미 종료된 것으로 표시된(예: \"실제 기간: "
+        "2085년~2090년, 이미 종료됨\") 상태/관계는, 그 기록 자체로 이미 완결된 확정 사실이다 — "
+        "그 종료를 다시 서술하는 새 이벤트(point든 duration이든)를 만들 필요가 전혀 없다. 그 "
+        "상태가 그 종료 연도 이후로는 이미 끝나 있다는 것을 그냥 전제로 삼고, 곧바로 그 다음 "
+        "이야기(사용자가 실제로 요청한 내용)를 써라 — 이미 끝난 일을 다시 '풀려났다', "
+        "'해제됐다' 같은 문장으로 새로 만들어 사건 하나를 낭비하지 마라.\n\n"
         "duration_effect.action은 다음 중 하나다 — 특히 clear는 이미 열려 있는 기존 상태/관계를 "
         "실제로 종료시키는 유일한 방법이다: 새로 별개의 duration 레코드를 만들어 '해제되었다'고 "
         "서술하는 것만으로는 기존 기록이 실제로 닫히지 않는다 (그 기존 레코드의 end_year는 "
         "그대로 비어있는 채 남는다). 위 '엔티티의 관련 기록'에 이미 열려 있는(end_year 없는) "
         "상태/관계가 있고, 이번 서사가 그것을 끝내는 내용이라면 반드시 clear를 써서 그 기존 "
-        "기록 자체를 닫아라:\n"
+        "기록 자체를 닫아라 (이미 종료된 기록은 위 문단대로 그대로 두고 새로 clear하지 마라):\n"
         "  - set: 새로운 상태/관계가 이 사건에서 시작됨. start_year 필요, end_year는 없음.\n"
         "  - clear: 이미 열려 있는 기존 상태/관계가 이 사건에서 끝남 (예: 추방이 풀렸다, 수감에서 "
         "석방됐다, 단체가 해체됐다). entity와 predicate는 반드시 그 기존 열린 기록과 정확히 "
@@ -606,54 +787,122 @@ def compose_narrative(
         "}\n"
     )
 
-    raw = _invoke_llm(prompt)
-    data = _extract_json(raw)
+    # Tagged entities + every backdrop entity Creator was actually shown as
+    # freely referenceable (backdrop_ids, above) — NOT tagged entities
+    # alone. A location/artifact/faction is legitimately usable without
+    # ever being tagged in the *current* request (e.g. reusing
+    # loc_은빛도시_지하감옥 from an already-existing imprisonment record
+    # tagged only in some earlier, separate request); validating against
+    # just resolved_entities rejected exactly this as if it were a
+    # hallucinated id, when it was a perfectly real, intentionally-always-
+    # usable one (caught via direct repro, not anticipated when this
+    # validation was first added).
+    tagged_and_backdrop_ids = set(resolved_entities.values()) | set(backdrop_ids)
 
-    new_entities, tag_to_id = _resolve_new_entities(data, allowed_new_categories)
+    # Retried as a whole (invoke -> resolve -> build -> validate), not just
+    # the raw invoke+parse _invoke_llm_json already retries on its own —
+    # this catches a *structurally valid* JSON response that still
+    # references an entity_id nothing actually resolves to: an LLM
+    # occasionally hallucinates a near-miss id for a rare custom name (the
+    # "쟩" vs the real "데이비드" case _matching_tagged_entity guards against for
+    # new_entities specifically) and can just as easily drop that same
+    # typo'd id straight into a duration_effect/involved_entities reference
+    # without ever declaring it as a new entity at all — nothing downstream
+    # would ever notice a bogus string flowing through as if it were real.
+    # _autocorrect (below) fixes an obvious one-character slip like that in
+    # place rather than failing the whole attempt over it; only a
+    # reference with no close match at all still falls through to
+    # bad_reference and a full recompose.
+    last_error = None
+    for _ in range(2):
+        data = _invoke_llm_json(prompt)
+        new_entities, tag_to_id = _resolve_new_entities(data, allowed_new_categories, resolved_entities)
+        _autopromote_undeclared_ids(data, allowed_new_categories, tag_to_id, new_entities)
+        all_valid_ids = tagged_and_backdrop_ids | set(tag_to_id.values())
 
-    events = []
-    for e in (data.get("events") or [])[:MAX_EVENTS]:
-        involved = [_remap_tags(v, tag_to_id) for v in (e.get("involved_entities") or [])]
-        location = _remap_tags(e.get("location"), tag_to_id)
-        duration_effect = e.get("duration_effect")
-        if duration_effect:
-            duration_effect = dict(duration_effect)
-            duration_effect["entity"] = _remap_tags(duration_effect.get("entity"), tag_to_id)
-            duration_effect["target"] = _remap_tags(duration_effect.get("target"), tag_to_id)
-        # Folded into involved_entities here, not left as a bare field —
-        # this is what actually gets the location a reciprocal event_ids
-        # pointer (via archivist's own pointer registration), the same way
-        # a location tagged directly in the normal chat pipeline gets one.
-        # Without this, the location field alone would still render as a
-        # clickable link on the event's own page (Phase 10 patch 20 renders
-        # any set reference field), but the location's *own* page would
-        # never show this event back — a one-directional link, not the
-        # real thing. New entities referenced only via duration_effect (not
-        # involved_entities) get the same treatment for the same reason.
-        if location and location not in involved:
-            involved.append(location)
-        for extra in (
-            (duration_effect or {}).get("entity"),
-            (duration_effect or {}).get("target"),
-        ):
-            if extra and extra not in involved:
-                involved.append(extra)
-        events.append(
-            DraftEvent(
-                event_type=e.get("event_type", "point"),
-                notes=e.get("notes", ""),
-                involved_entities=involved,
-                year=e.get("year"),
-                location=location,
-                duration_effect=duration_effect,
+        def _autocorrect(ref):
+            # Fixes an obvious one-character hallucinated slip (e.g.
+            # "char_쟩" for the real, already-valid "char_데이비드") in place
+            # instead of failing the whole attempt over it — only a
+            # reference with no close match at all falls through to
+            # bad_reference below.
+            if ref is None or ref in all_valid_ids:
+                return ref
+            return _closest_valid_id(ref, all_valid_ids) or ref
+
+        events = []
+        bad_reference = None
+        for e in (data.get("events") or [])[:MAX_EVENTS]:
+            involved = [_autocorrect(_remap_tags(v, tag_to_id)) for v in (e.get("involved_entities") or [])]
+            location = _autocorrect(_remap_tags(e.get("location"), tag_to_id))
+            duration_effect = e.get("duration_effect")
+            if duration_effect:
+                duration_effect = dict(duration_effect)
+                duration_effect["entity"] = _autocorrect(_remap_tags(duration_effect.get("entity"), tag_to_id))
+                duration_effect["target"] = _autocorrect(_remap_tags(duration_effect.get("target"), tag_to_id))
+                if duration_effect.get("action") in ("clear", "set_closed") and not duration_effect.get("target"):
+                    # The narrative closing a status (e.g. "석방되었다") rarely
+                    # re-mentions the target it was recorded against (e.g. the
+                    # prison), so the LLM naturally leaves target null even
+                    # though hard_check.check_duration_closure_conflict and
+                    # inspect_draft's closed_predicates both key on the full
+                    # (entity, predicate, target) triple and silently no-op
+                    # instead of actually closing anything on a target
+                    # mismatch (None != loc_은빛도시_지하감옥) — observed via
+                    # direct user report: a release event "passed" but the very
+                    # next event was still rejected as if still imprisoned.
+                    # Fill it in from whatever's actually open in storage for
+                    # this (entity, predicate), same "resolve before it can go
+                    # wrong" pattern as _backdrop_entity_ids/temporal filters.
+                    duration_effect["target"] = _resolve_open_target(
+                        duration_effect.get("entity"), duration_effect.get("predicate")
+                    )
+            # Folded into involved_entities here, not left as a bare field —
+            # this is what actually gets the location a reciprocal event_ids
+            # pointer (via archivist's own pointer registration), the same way
+            # a location tagged directly in the normal chat pipeline gets one.
+            # Without this, the location field alone would still render as a
+            # clickable link on the event's own page (Phase 10 patch 20 renders
+            # any set reference field), but the location's *own* page would
+            # never show this event back — a one-directional link, not the
+            # real thing. New entities referenced only via duration_effect (not
+            # involved_entities) get the same treatment for the same reason.
+            if location and location not in involved:
+                involved.append(location)
+            for extra in (
+                (duration_effect or {}).get("entity"),
+                (duration_effect or {}).get("target"),
+            ):
+                if extra and extra not in involved:
+                    involved.append(extra)
+
+            for ref in involved:
+                if ref not in all_valid_ids:
+                    bad_reference = ref
+                    break
+            if bad_reference:
+                break
+
+            events.append(
+                DraftEvent(
+                    event_type=e.get("event_type", "point"),
+                    notes=e.get("notes", ""),
+                    involved_entities=involved,
+                    year=e.get("year"),
+                    location=location,
+                    duration_effect=duration_effect,
+                )
             )
-        )
 
-    return NarrativeDraft(
-        events=events,
-        new_entities=new_entities,
-        natural_event_count=data.get("natural_event_count") or len(events),
-    )
+        if bad_reference is None:
+            return NarrativeDraft(
+                events=events,
+                new_entities=new_entities,
+                natural_event_count=data.get("natural_event_count") or len(events),
+            )
+        last_error = ValueError(f"존재하지 않는 entity_id를 참조했습니다: {bad_reference!r}")
+
+    raise last_error
 
 
 # ---------------------------------------------------------------------------
@@ -770,7 +1019,15 @@ def inspect_draft(resolved_entities: dict, draft: NarrativeDraft) -> InspectionR
                 closer_entity = event.duration_effect.get("entity")
                 predicate = event.duration_effect.get("predicate")
                 if closer_entity and predicate:
-                    closed_predicates.add((closer_entity, predicate))
+                    # Keyed by (entity, predicate, target), not just
+                    # (entity, predicate) — the same predicate can be open
+                    # toward multiple different targets at once (X friends
+                    # with both A and B), and closing X-A must not also
+                    # suppress X-B's own still-genuinely-active [활성] tag
+                    # (caught via direct repro, same family of bug as
+                    # check_duration_closure_conflict conflating separate
+                    # episodes of the same predicate).
+                    closed_predicates.add((closer_entity, predicate, event.duration_effect.get("target")))
 
     return InspectionResult(approved=True)
 

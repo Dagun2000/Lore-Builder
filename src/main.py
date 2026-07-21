@@ -105,8 +105,8 @@ def run_pipeline(user_input: str) -> dict:
             continue
         # Only entities the event implies were actually present/alive get
         # this event's year(s) injected as a hard-check constraint — e.g.
-        # digging up [쟝]'s grave shouldn't force 쟝 to have been alive for
-        # the dig's year, but playing together with [쟝] should. Default
+        # digging up [데이비드]'s grave shouldn't force 데이비드 to have been alive for
+        # the dig's year, but playing together with [데이비드] should. Default
         # True (old behavior) if the LLM omitted this entity_id.
         is_present = inferred_event.entity_presence.get(entity_id, True)
         extra_years = list(parsed.years) if is_present else None

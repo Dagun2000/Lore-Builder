@@ -120,7 +120,7 @@ faction:
       required: true
     - name: category
       type: enum
-      options: [mercenary_guild, kingdom, religious_order, tribe]
+      options: [용병단, 왕국, 종교단체, 부족]
       required: true
     - name: founded_year
       type: integer
@@ -159,20 +159,20 @@ Field types: `text`, `integer`, `boolean`, `enum` (with an `options` list), `ref
 
 ```
 ---
-id: char_쟝
-name: 쟝
+id: char_데이비드
+name: 데이비드
 ...
 event_ids:
-  - event_쟝_2080
+  - event_데이비드_2080
 ---
 
-쟝(Jang)은 용병 길드 소속의 인간 용병이다. ...
+데이비드(David)은 용병 길드 소속의 인간 용병이다. ...
 ```
 
 A few things to keep in mind when hand-editing these:
 
 - **Pointers are manual and bidirectional.** If you add a timeline event that references a character, also add that event's id to the character's own `event_ids` list (and to any other entity it involves) — nothing auto-syncs a hand-edited file the way saving through the app does.
-- **Give an id the same script as the entity's own name.** The sample data's ids are Korean slugs of the entity's name (`char_쟝`, not `char_jang`) — consistent with what the app itself generates for anything created through the pipeline. Mixing scripts (a Korean-named entity with a romanized id) is exactly what once caused the AI to reconstruct a guessed, garbled rendering of the name from the id instead of using the real one — keep new ids in whatever script your `name` field is in.
+- **Give an id the same script as the entity's own name.** The sample data's ids are Korean slugs of the entity's name (`char_데이비드`, not `char_jang`) — consistent with what the app itself generates for anything created through the pipeline. Mixing scripts (a Korean-named entity with a romanized id) is exactly what once caused the AI to reconstruct a guessed, garbled rendering of the name from the id instead of using the real one — keep new ids in whatever script your `name` field is in.
 - **Reseed after editing.** Delete `db/lore.db` and the `chroma_store/` directory, then run `python scripts/seed_db.py` again — seeding doesn't retroactively clean up rows for files you removed.
 
 ### Choosing an LLM provider

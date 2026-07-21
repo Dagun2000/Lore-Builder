@@ -206,9 +206,9 @@ def build_timeline(entity_id: str) -> list:
     per spec. Duration labels are `predicate` plus the *other* party's name
     when one is set (e.g. "적대: 캐서린") — a relational record's entity/
     target pair isn't self-vs-other, it's just two sides, and entity_id can
-    legitimately be sitting on either one (e.g. "미라가 쟝을 알게 되었다" has
-    entity=미라, target=쟝; viewing 쟝's own timeline must still label the
-    *other* party (미라), not repeat back 쟝's own id from the target field
+    legitimately be sitting on either one (e.g. "미라가 데이비드를 알게 되었다" has
+    entity=미라, target=데이비드; viewing 데이비드's own timeline must still label the
+    *other* party (미라), not repeat back 데이비드's own id from the target field
     — caught by testing on the seed data's own `knows` record)."""
     entries = []
     for event in storage.get_events_for_entity(entity_id):
@@ -287,14 +287,19 @@ def resolve_timeline_reference(entity_id: str) -> dict:
     unknown birth/founding year has to start being told from *somewhere*.
 
     "cutoff" only gets computed when "end" is absent, since nothing else
-    would bound an open-ended bar in that case. It's based on entity_id's
-    own chronologically LAST recorded event (get_events_for_entity's own
-    sort order, so entries[-1]): if that event is a point event, the
-    cutoff is just its year (a known fact, x == year); if it's a duration
-    event, the cutoff's *label* stays that event's own real start_year,
-    while its *plotted x* gets _OPEN_DURATION_CUTOFF_BUFFER added on top
-    purely so a duration that only just started still renders as a
-    visible bar instead of a zero-length stub — is_guess=True either way.
+    would bound an open-ended bar in that case. It's based on whichever of
+    entity_id's own events reaches furthest into the timeline — a point
+    event's own year; a duration event's real end_year when set (a known
+    fact, x == year); or, only for a duration event still genuinely open
+    (no end_year), its start_year plus _OPEN_DURATION_CUTOFF_BUFFER purely
+    so it still renders as a visible bar instead of a zero-length stub.
+    Every event is compared this way and the single furthest one wins —
+    NOT just get_events_for_entity's own last-sorted entry, which sorts a
+    duration event by its start_year alone and so could pick an earlier-
+    reaching event over one that started earlier but was later extended/
+    closed much further out (caught via direct repro: an imprisoned status
+    2000~2300 lost to an unrelated 2050 point event for "last" every
+    time). is_guess=True regardless of which event or branch it came from.
     This replaces an earlier version that used the single latest year
     recorded anywhere in the WHOLE timeline table as a shared "now" — that
     looked fine until an entity's own newest event happened to equal that
@@ -335,17 +340,39 @@ def resolve_timeline_reference(entity_id: str) -> dict:
                 if first_year is not None:
                     result["start"] = ReferenceLine(year=first_year, x=first_year, label="첫 기록", is_guess=True)
             if result["end"] is None:
-                last = events[-1]
-                if last.get("entity"):
-                    cutoff_year = last.get("start_year") or 0
+                # Scanned across every event, not just events[-1] — that
+                # was sorted by a duration event's own start_year (see
+                # storage.get_events_for_entity), completely blind to its
+                # end_year even when set. A status that started early but
+                # was later extended/closed far in the future (e.g.
+                # imprisoned 2000~2300) still sorted as if 2000 were its
+                # only relevant year, so a later-STARTING point event
+                # (say, 2050) wrongly won "last event" over a duration
+                # record that actually reaches to 2300 — the cutoff line
+                # then stayed stuck wherever it was even after the real
+                # extent of the timeline had clearly moved (caught via a
+                # direct repro, not anticipated up front). Each event's own
+                # furthest known point — a duration's real end_year when
+                # set, else its start_year plus the small guess buffer; a
+                # point event's own year — is compared, and the single
+                # furthest one wins, whichever event it came from.
+                furthest_x, furthest_year = None, None
+                for event in events:
+                    if event.get("entity"):
+                        end = event.get("end_year")
+                        if end is not None:
+                            x, year = end, end
+                        else:
+                            start = event.get("start_year") or 0
+                            x, year = start + _OPEN_DURATION_CUTOFF_BUFFER, start
+                    else:
+                        x = year = event.get("year")
+                    if x is None:
+                        continue
+                    if furthest_x is None or x > furthest_x:
+                        furthest_x, furthest_year = x, year
+                if furthest_x is not None:
                     result["cutoff"] = ReferenceLine(
-                        year=cutoff_year, x=cutoff_year + _OPEN_DURATION_CUTOFF_BUFFER,
-                        label="마지막 이벤트", is_guess=True,
+                        year=furthest_year, x=furthest_x, label="마지막 이벤트", is_guess=True,
                     )
-                else:
-                    cutoff_year = last.get("year")
-                    if cutoff_year is not None:
-                        result["cutoff"] = ReferenceLine(
-                            year=cutoff_year, x=cutoff_year, label="마지막 이벤트", is_guess=True,
-                        )
     return result

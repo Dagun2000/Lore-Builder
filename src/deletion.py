@@ -9,7 +9,7 @@ that record.
 
 from dataclasses import dataclass, field
 
-from . import schema, storage
+from . import flags, schema, storage
 
 
 @dataclass
@@ -23,12 +23,22 @@ def delete_event(event_id: str) -> DeletionResult:
     """Remove event_id from every entity that points at it, then delete the
     timeline record itself from SQLite + Chroma. No entity is left with a
     dangling pointer — that's the whole point of tracking references via
-    event_ids instead of a separate join table."""
+    event_ids instead of a separate join table.
+
+    Also clears any flag sitting on event_id itself (flags.py has its own
+    id-keyed table, entirely separate from event_ids pointers) — flagging
+    something for a later look and then deleting the very thing flagged
+    used to leave the flag dangling forever, pointing at an entity_id
+    nothing resolves to anymore, since nothing in this module touched
+    flags at all before. Every *edit* path (app.py's field-save and
+    event-save buttons) already called flags.clear_flags_for_entity on
+    success; deletion just never got the same treatment."""
     referencing = storage.find_entities_referencing_event(event_id)
     for _category, entity_id in referencing:
         storage.remove_event_pointer(entity_id, event_id)
 
     storage.delete_entity_everywhere("timeline", event_id)
+    flags.clear_flags_for_entity(event_id)
 
     return DeletionResult(
         deleted_id=event_id,
@@ -67,6 +77,7 @@ def delete_entity(entity_id: str, category: str) -> DeletionResult:
             affected_entities.update(result.affected_entities)
 
     storage.delete_entity_everywhere(category, entity_id)
+    flags.clear_flags_for_entity(entity_id)
     affected_entities.discard(entity_id)
 
     return DeletionResult(

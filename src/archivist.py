@@ -108,7 +108,7 @@ def _register_pointer(pointer_targets: dict, entity_id: str, event_id: str) -> N
 
 
 def _short_label(entity_id: str) -> str:
-    """Strip an entity_id's category prefix (char_쟝 -> 쟝) for use inside a
+    """Strip an entity_id's category prefix (char_데이비드 -> 데이비드) for use inside a
     generated timeline id — the full event_summary/notes text used to be
     slugified wholesale instead, which for a rich multi-clause sentence
     (Creator's drafts especially) produced an id dozens of characters long,

@@ -142,9 +142,10 @@ def check_lifespan_violation(
 
 def check_duration_closure_conflict(duration_effect: dict | None) -> Conflict | None:
     """A `clear`/`set_closed` duration_effect proposes ending an (entity,
-    predicate, target) status/relationship at some end_year — if a
-    matching record in storage is already closed for real (its own
-    end_year already set), the proposed end_year must agree with it.
+    predicate, target) status/relationship at some end_year — if the
+    record that's actually still open is closed for real (its own
+    end_year already set) and the proposed end_year disagrees, that's a
+    genuine conflict.
 
     This exists because an LLM contradiction check was tried first and
     didn't hold: rag_check's context now spells out a record's real
@@ -152,10 +153,44 @@ def check_duration_closure_conflict(duration_effect: dict | None) -> Conflict | 
     record's own notes, and a fictional new event closing the same status
     at a *different* year (e.g. 2086) still sailed through — the model
     just didn't connect the two. A plain field comparison in code doesn't
-    have that failure mode; it either matches or it doesn't."""
+    have that failure mode; it either matches or it doesn't.
+
+    The same (entity, predicate, target) triple can legitimately recur —
+    imprisoned once, released, imprisoned again later — leaving multiple
+    matching records, only one of which (if any) is still open. A first
+    version of this check compared the proposed end_year against *every*
+    matching record regardless of whether it was already closed, so
+    closing a genuinely new, currently-open second imprisonment got
+    rejected because it disagreed with the first, unrelated, already-
+    closed one from years earlier (caught via direct repro, not
+    anticipated). Only the currently-open record (if one exists) is what
+    this closure could possibly be about — an already-closed record from
+    a separate past episode is irrelevant to it. Comparison against
+    already-closed records only happens when nothing is currently open at
+    all, which is exactly the original bug this check was built to catch.
+
+    That "compare against the one already-closed record" step only makes
+    sense for `clear`, which by spec carries no start_year of its own — it
+    is inherently a reference to *some specific existing* record it means
+    to close, so if nothing is open, the only candidate left is whichever
+    already-closed record shares the triple, and a disagreeing end_year on
+    that is a genuine self-contradiction. `set_closed` is the opposite: it
+    always supplies its own start_year, so it is a wholly new, self-
+    contained episode by construction, never a reference to an older one —
+    "traveled_world_with 2080-2084, already closed" existing on record must
+    never block a brand-new "traveled_world_with 2105-2110" set_closed for
+    the same pair; recurrence is legitimate (this function's own docstring
+    says so), and set_closed has no ambiguity to resolve in the first place
+    since it never needs another record's start_year to be complete. Caught
+    via direct user report: a second, later 2105-2110 relationship of the
+    exact same predicate was rejected as contradicting the first, unrelated,
+    already-closed 2080-2084 episode — the same conflating-separate-
+    episodes bug this docstring already warns about, just reached through
+    set_closed instead of the currently-open branch above."""
     if not duration_effect:
         return None
-    if duration_effect.get("action") not in ("clear", "set_closed"):
+    action = duration_effect.get("action")
+    if action not in ("clear", "set_closed"):
         return None
     entity_id = duration_effect.get("entity")
     predicate = duration_effect.get("predicate")
@@ -164,11 +199,23 @@ def check_duration_closure_conflict(duration_effect: dict | None) -> Conflict | 
         return None
     target = duration_effect.get("target")
 
-    for event in storage.get_events_for_entity(entity_id):
-        if event.get("entity") != entity_id or event.get("predicate") != predicate:
-            continue
-        if event.get("target") != target:
-            continue
+    matching = [
+        event for event in storage.get_events_for_entity(entity_id)
+        if event.get("entity") == entity_id
+        and event.get("predicate") == predicate
+        and event.get("target") == target
+    ]
+    if any(event.get("end_year") is None for event in matching):
+        # A currently-open record exists — that's the one this closure is
+        # about, and closing it is always valid regardless of what any
+        # separate, already-closed past episode says.
+        return None
+    if action == "set_closed":
+        # A brand-new, self-contained episode never needs to match an
+        # older closed one — see the docstring section above.
+        return None
+
+    for event in matching:
         existing_end = event.get("end_year")
         if existing_end is not None and existing_end != proposed_end:
             return Conflict(
