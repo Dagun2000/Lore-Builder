@@ -36,7 +36,7 @@ def test_find_related_context_lists_every_pointed_at_event():
         {
             "entity": "char_p6_b",
             "predicate": "member_of",
-            "target": "faction_mercenary_guild",
+            "target": "faction_용병_길드",
             "start_year": 2040,
             "end_year": None,
             "notes": "레인이 용병 길드에 들어갔다.",

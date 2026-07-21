@@ -20,10 +20,10 @@ def test_parse_input_allows_missing_year():
     assert result.tags == ["쟝", "검은 산양 여관"]
 
 
-def test_find_existing_matches_matches_seed_char_jang():
+def test_find_existing_matches_matches_seed_char_쟝():
     exact, partial = mapping.find_existing_matches("쟝", "character")
 
-    assert exact == ["char_jang"]
+    assert exact == ["char_쟝"]
     assert partial == []
 
 

@@ -43,12 +43,12 @@ def test_new_character_name_prompt_defaults_to_tag_but_cannot_be_cleared(
     assert fields["name"] == "쟝2"
 
 
-def test_find_existing_matches_uses_name_field_for_char_mira():
-    # char_mira's notes text doesn't literally contain "미라" in every seed
+def test_find_existing_matches_uses_name_field_for_char_미라():
+    # char_미라's notes text doesn't literally contain "미라" in every seed
     # revision — matching must work off the dedicated name field regardless.
     exact, partial = mapping.find_existing_matches("미라", "character")
 
-    assert exact == ["char_mira"]
+    assert exact == ["char_미라"]
 
 
 def test_find_existing_matches_partial_name_match():

@@ -14,11 +14,11 @@ def test_build_diff_point_event_adds_pointers_to_every_involved_entity():
         tags=["쟝", "검은 산양 여관"],
         raw_text="쟝이 검은 산양 여관에서 얻어맞았다.",
     )
-    resolved = {"쟝": "char_jang", "검은 산양 여관": "loc_black_goat_inn"}
+    resolved = {"쟝": "char_쟝", "검은 산양 여관": "loc_검은_염소_주점"}
     inferred = InferredEvent(
         event_type="point",
         event_summary="쟝이 검은 산양 여관에서 얻어맞았다.",
-        involved_entities=["char_jang", "loc_black_goat_inn"],
+        involved_entities=["char_쟝", "loc_검은_염소_주점"],
     )
 
     diff = archivist.build_diff(parsed, resolved, inferred)
@@ -28,13 +28,13 @@ def test_build_diff_point_event_adds_pointers_to_every_involved_entity():
 
     assert len(timeline_creates) == 1
     assert timeline_creates[0].fields["year"] == 2100
-    assert timeline_creates[0].fields["location"] == "loc_black_goat_inn"
+    assert timeline_creates[0].fields["location"] == "loc_검은_염소_주점"
     timeline_id = timeline_creates[0].entity_id
 
-    assert "char_jang" in pointer_updates
-    assert timeline_id in pointer_updates["char_jang"].fields["event_ids"]
-    assert "loc_black_goat_inn" in pointer_updates
-    assert timeline_id in pointer_updates["loc_black_goat_inn"].fields["event_ids"]
+    assert "char_쟝" in pointer_updates
+    assert timeline_id in pointer_updates["char_쟝"].fields["event_ids"]
+    assert "loc_검은_염소_주점" in pointer_updates
+    assert timeline_id in pointer_updates["loc_검은_염소_주점"].fields["event_ids"]
 
 
 def test_build_diff_duration_clear_updates_the_open_record_not_a_new_one():
@@ -112,13 +112,13 @@ def test_generate_id_avoids_collision():
 
 def test_duration_set_always_creates_new_timeline_record():
     parsed = ParsedInput(years=[2100], tags=["쟝"], raw_text="쟝이 은빛도시와 적대하게 됐다.")
-    resolved = {"쟝": "char_jang"}
+    resolved = {"쟝": "char_쟝"}
     inferred = InferredEvent(
         event_type="duration",
         duration_effect={
-            "entity": "char_jang",
+            "entity": "char_쟝",
             "predicate": "hostile_with",
-            "target": "loc_silver_city",
+            "target": "loc_은빛도시",
             "action": "set",
             "start_year": 2100,
             "end_year": None,
@@ -142,7 +142,7 @@ def test_is_single_event_false_returns_confirmation_needed():
         ambiguity_reason="서로 다른 두 사건이 한 문장에 섞여 있습니다.",
     )
 
-    result = archivist.build_diff(parsed, {"쟝": "char_jang", "랄프": "char_ralph"}, inferred)
+    result = archivist.build_diff(parsed, {"쟝": "char_쟝", "랄프": "char_ralph"}, inferred)
 
     assert isinstance(result, archivist.ConfirmationNeeded)
     assert result.reason == "서로 다른 두 사건이 한 문장에 섞여 있습니다."

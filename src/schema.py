@@ -156,7 +156,7 @@ def coerce_value(field_def: dict, raw_value: str):
 
 
 def category_from_id(entity_id: str) -> str | None:
-    """Reverse-match an entity id (e.g. char_jang) to its category via id_prefix."""
+    """Reverse-match an entity id (e.g. char_쟝) to its category via id_prefix."""
     registry = load_schema_registry()
     matches = [
         category

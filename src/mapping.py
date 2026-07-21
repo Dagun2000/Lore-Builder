@@ -80,7 +80,7 @@ def find_existing_matches(tag: str, category: str) -> tuple:
     """Match against the category's `name` field only — notes is
     descriptive prose, not an identifier, and matching against it meant a tag
     only worked if it happened to appear verbatim in some sentence (e.g.
-    char_mira went unmatched until "미라" was literally written into her
+    char_미라 went unmatched until "미라" was literally written into her
     notes). Categories with no `name` field (relationship/timeline/system)
     are never tag-matchable and always return ([], []).
 

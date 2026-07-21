@@ -11,11 +11,11 @@ def test_sqlite_save_and_get_roundtrip():
     storage.save_entity(
         "character",
         "char_test_roundtrip",
-        {"birth_year": 1999, "race": "race_human", "notes": "test entity"},
+        {"birth_year": 1999, "race": "race_인간", "notes": "test entity"},
     )
     entity = storage.get_entity("character", "char_test_roundtrip")
     assert entity["birth_year"] == 1999
-    assert entity["race"] == "race_human"
+    assert entity["race"] == "race_인간"
     assert entity["notes"] == "test entity"
 
 
@@ -45,10 +45,10 @@ def test_chroma_save_and_query():
     assert "char_test_chroma" in found_ids
 
 
-def test_get_event_years_for_char_jang():
-    # char_jang's seeded event_ids span: event_jang_2080 (2080),
-    # event_jang_imprisoned (2085), event_jang_membership (start 2070),
-    # event_jang_imprisoned_status (start 2085), event_mira_knows_jang
+def test_get_event_years_for_char_쟝():
+    # char_쟝's seeded event_ids span: event_쟝_2080 (2080),
+    # event_쟝_수감 (2085), event_쟝_용병_길드_가입 (start 2070),
+    # event_쟝_수감_상태 (start 2085), event_미라_쟝_지인
     # (start 2079) — get_event_years collects every year+start_year+end_year
     # across all of them.
-    assert storage.get_event_years("char_jang") == [2070, 2079, 2080, 2085]
+    assert storage.get_event_years("char_쟝") == [2070, 2079, 2080, 2085]

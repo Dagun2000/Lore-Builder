@@ -25,6 +25,7 @@ from src import (
     field_update,
     flags,
     hard_check,
+    i18n,
     pipeline_session,
     schema,
     storage,
@@ -34,12 +35,31 @@ from src import (
 _NAME_BEARING_CATEGORIES = ("character", "location", "faction", "artifact", "race")
 
 
+def L(text: str) -> str:
+    """Translate `text` to the current interface language (Phase 10 patch
+    18) — a one-letter name because this wraps hundreds of call sites
+    throughout this file; anything longer would be its own kind of
+    clutter. See i18n.py for why the Korean text itself is the lookup key,
+    not an abstract identifier.
+
+    CAUTION: a handful of bare Korean strings ("예", "아니오", "그래도 저장",
+    "취소", and the dict key "수정") are also literal protocol values that
+    pipeline_session.py/mapping.py/main.py compare against directly when a
+    decision is resumed (`if answer == "예":` etc.) — never wrap the
+    ARGUMENT to `_resume(session, ...)` in `L()`; only wrap what a widget
+    *displays*. Getting this backwards silently breaks that response path
+    in English mode (the backend would keep expecting the Korean literal
+    forever, regardless of interface language)."""
+    return i18n.t(text, st.session_state.get("interface_language", "ko"))
+
+
 # ---------------------------------------------------------------------------
 # Session-state setup
 # ---------------------------------------------------------------------------
 
 def _init_session_state() -> None:
     defaults = {
+        "interface_language": "ko",
         "chat_history": [],
         "session": None,
         "creator_history": [],
@@ -115,13 +135,18 @@ def _reference_options(ref_category: str) -> list:
             for e in storage.list_entities(category):
                 options.append((f'{e.get("name") or e["id"]} ({e["id"]})', e["id"]))
         for e in storage.list_entities("timeline"):
-            options.append((f'{e["id"]} ({e.get("year", "?")}년)', e["id"]))
+            options.append((_year_label(e), e["id"]))
         return options
 
     entities = storage.list_entities(ref_category)
     if ref_category == "timeline":
-        return [(f'{e["id"]} ({e.get("year", "?")}년)', e["id"]) for e in entities]
+        return [(_year_label(e), e["id"]) for e in entities]
     return [(f'{e.get("name") or e["id"]} ({e["id"]})', e["id"]) for e in entities]
+
+
+def _year_label(event: dict) -> str:
+    year = event.get("year", "?")
+    return f'{event["id"]} ({year}{L("년")})'
 
 
 def _render_value_field(field_def: dict, current_value, key: str, label: str | None = None):
@@ -137,14 +162,14 @@ def _render_value_field(field_def: dict, current_value, key: str, label: str | N
         labels = [opt_label for opt_label, _id in options]
         ids = [entity_id for _label, entity_id in options]
         index = ids.index(current_value) + 1 if current_value in ids else 0
-        choice = st.selectbox(display_name, ["(비어있음)"] + labels, index=index, key=key)
-        return None if choice == "(비어있음)" else ids[labels.index(choice)]
+        choice = st.selectbox(display_name, [L("(비어있음)")] + labels, index=index, key=key)
+        return None if choice == L("(비어있음)") else ids[labels.index(choice)]
 
     if field_type == "enum":
         options = field_def.get("options") or []
         index = options.index(current_value) + 1 if current_value in options else 0
-        choice = st.selectbox(display_name, ["(비어있음)"] + options, index=index, key=key)
-        return None if choice == "(비어있음)" else choice
+        choice = st.selectbox(display_name, [L("(비어있음)")] + options, index=index, key=key)
+        return None if choice == L("(비어있음)") else choice
 
     if field_type == "boolean":
         return st.checkbox(display_name, value=bool(current_value), key=key)
@@ -190,39 +215,39 @@ def _resume(session, response) -> None:
 def _describe_result(result: dict) -> str:
     status = result.get("status")
     if status == "error":
-        return f"입력 오류: {result['message']}"
+        return L("입력 오류: {0}").format(result['message'])
     if status == "cancelled":
-        return result.get("message", "취소되었습니다.")
+        return result.get("message", L("취소되었습니다."))
     if status == "rejected" and result.get("stage") == "hard_check":
-        lines = ["하드체크 결과에 따라 저장이 중단되었습니다."]
+        lines = [L("하드체크 결과에 따라 저장이 중단되었습니다.")]
         for c in result.get("conflicts", []):
             if c.severity == "blocking":
                 lines.append(f"- [{c.check_type}] {c.entity_id}: {c.reason}")
         return "\n".join(lines)
     if status == "rejected" and result.get("stage") == "rag_check":
-        return "RAG 검증 결과에 따라 저장이 중단되었습니다."
+        return L("RAG 검증 결과에 따라 저장이 중단되었습니다.")
     if status == "no_changes":
-        return "승인된 변경사항이 없어 저장할 내용이 없습니다."
+        return L("승인된 변경사항이 없어 저장할 내용이 없습니다.")
     if status == "entity_only":
-        return result.get("message", "엔티티가 저장되었습니다. 별도의 사건 기록은 없습니다.")
+        return result.get("message", L("엔티티가 저장되었습니다. 별도의 사건 기록은 없습니다."))
     if status == "no_new_info":
-        return result.get("message", "새로 저장할 내용이 없습니다.")
+        return result.get("message", L("새로 저장할 내용이 없습니다."))
     if status == "saved":
         applied = result.get("applied", [])
         names = ", ".join(
-            f"{c.entity_id}(갱신)" if c.action == "update" else c.entity_id for c in applied
+            L("{0}(갱신)").format(c.entity_id) if c.action == "update" else c.entity_id for c in applied
         )
-        return f"저장 완료: {names}"
-    return "완료되었습니다."
+        return L("저장 완료: {0}").format(names)
+    return L("완료되었습니다.")
 
 
 def _render_entity_candidates(session, decision, key_prefix) -> None:
     payload = decision.payload
-    st.write(f'"{payload["tag"]}" 후보를 선택하세요:')
+    st.write(L('"{0}" 후보를 선택하세요:').format(payload["tag"]))
     for i, candidate_id in enumerate(payload["candidates"]):
         if st.button(candidate_id, key=f"{key_prefix}_cand_{i}"):
             _resume(session, candidate_id)
-    if payload.get("allow_create") and st.button("새로 작성", key=f"{key_prefix}_create"):
+    if payload.get("allow_create") and st.button(L("새로 작성"), key=f"{key_prefix}_create"):
         _resume(session, pipeline_session.CREATE_NEW)
 
 
@@ -233,10 +258,11 @@ def _render_entity_category_and_name(session, decision, key_prefix) -> None:
     payload = decision.payload
     categories = payload["categories"]
     st.write(
-        f'"{payload["tag"]}"을(를) **{payload["inferred_category"]}**(으)로 분류했습니다. 맞습니까?'
+        L('"{0}"을(를) **{1}**(으)로 분류했습니다. 맞습니까?')
+        .format(payload["tag"], payload["inferred_category"])
     )
     category = st.selectbox(
-        "카테고리",
+        L("카테고리"),
         categories,
         index=categories.index(payload["inferred_category"]),
         key=f"{key_prefix}_category",
@@ -248,14 +274,14 @@ def _render_entity_category_and_name(session, decision, key_prefix) -> None:
     # changes whether a name field even exists.
     has_name_field = "name" in {f["name"] for f in schema.get_fields(category)}
     if has_name_field:
-        name = st.text_input("이름", value=payload["default_name"], key=f"{key_prefix}_name")
+        name = st.text_input(L("이름"), value=payload["default_name"], key=f"{key_prefix}_name")
 
     col1, col2, col3 = st.columns(3)
-    if col1.button("저장 후 계속", key=f"{key_prefix}_save"):
+    if col1.button(L("저장 후 계속"), key=f"{key_prefix}_save"):
         _resume(session, {"category": category, "name": name, "action": "save"})
-    if col2.button("편집", key=f"{key_prefix}_edit"):
+    if col2.button(L("편집"), key=f"{key_prefix}_edit"):
         _resume(session, {"category": category, "name": name, "action": "edit"})
-    if col3.button("취소", key=f"{key_prefix}_cancel"):
+    if col3.button(L("취소"), key=f"{key_prefix}_cancel"):
         _resume(session, {"category": category, "name": name, "action": "cancel"})
 
 
@@ -263,21 +289,25 @@ def _render_entity_terminal_status(session, decision, key_prefix) -> None:
     payload = decision.payload
     field_name = payload.get("field_name", "death_year")
     st.write(
-        f"[{payload['tag']}]가 이 사건({payload['year']}년)으로 사망(또는 활동 종료)한 것으로 "
-        f"추정됩니다. {field_name}={payload['year']}로 저장할까요?"
+        L("[{0}]가 이 사건({1}년)으로 사망(또는 활동 종료)한 것으로 추정됩니다. {2}={1}로 저장할까요?")
+        .format(payload["tag"], payload["year"], field_name)
     )
     col1, col2, col3 = st.columns(3)
-    if col1.button("예", key=f"{key_prefix}_yes"):
+    # Button LABELS are translated; the values passed to _resume() below are
+    # NOT — pipeline_session.py/mapping.py/main.py compare against these
+    # exact Korean strings as a fixed internal protocol, regardless of
+    # what the button displays (see the module-level note near L()).
+    if col1.button(L("예"), key=f"{key_prefix}_yes"):
         _resume(session, "예")
-    if col2.button("아니오", key=f"{key_prefix}_no"):
+    if col2.button(L("아니오"), key=f"{key_prefix}_no"):
         _resume(session, "아니오")
-    if col3.button("수정", key=f"{key_prefix}_edit_toggle"):
+    if col3.button(L("수정"), key=f"{key_prefix}_edit_toggle"):
         st.session_state[f"{key_prefix}_editing"] = True
     if st.session_state.get(f"{key_prefix}_editing"):
         new_year = st.number_input(
-            f"새로운 {field_name} 값", value=payload["year"], step=1, key=f"{key_prefix}_year"
+            L("새로운 {0} 값").format(field_name), value=payload["year"], step=1, key=f"{key_prefix}_year"
         )
-        if st.button(f"{field_name}로 저장", key=f"{key_prefix}_edit_confirm"):
+        if st.button(L("{0}로 저장").format(field_name), key=f"{key_prefix}_edit_confirm"):
             _resume(session, {"수정": {field_name: int(new_year)}})
 
 
@@ -286,14 +316,14 @@ def _render_entity_required_field(session, decision, key_prefix) -> None:
     every field goes through the same type -> widget mapping as the
     entity-detail editor (Phase 9 patch B)."""
     payload = decision.payload
-    st.write(f"[{payload['category']}] 필드를 입력하세요 (필수 항목은 *):")
+    st.write(L("[{0}] 필드를 입력하세요 (필수 항목은 *):").format(payload["category"]))
     values = {}
     for f in payload["fields"]:
         label = f"{f['name']} *" if f["required"] else f["name"]
         values[f["name"]] = _render_value_field(
             f, None, key=f"{key_prefix}_{f['name']}", label=label
         )
-    if st.button("저장", key=f"{key_prefix}_submit"):
+    if st.button(L("저장"), key=f"{key_prefix}_submit"):
         _resume(session, values)
 
 
@@ -305,9 +335,10 @@ def _render_hard_check_warning(session, decision, key_prefix) -> None:
     payload = decision.payload
     st.warning(f"[{payload['entity_id']}] {payload['reason']}")
     col1, col2 = st.columns(2)
-    if col1.button("그래도 저장", key=f"{key_prefix}_accept"):
+    # See the L() docstring: label translated, protocol value untouched.
+    if col1.button(L("그래도 저장"), key=f"{key_prefix}_accept"):
         _resume(session, "그래도 저장")
-    if col2.button("취소", key=f"{key_prefix}_cancel"):
+    if col2.button(L("취소"), key=f"{key_prefix}_cancel"):
         _resume(session, "취소")
 
 
@@ -315,9 +346,10 @@ def _render_rag_judgment(session, decision, key_prefix) -> None:
     payload = decision.payload
     st.warning(f"[{payload['judgment_type']}] {payload['reason']}")
     col1, col2 = st.columns(2)
-    if col1.button("그래도 저장", key=f"{key_prefix}_accept"):
+    # See the L() docstring: label translated, protocol value untouched.
+    if col1.button(L("그래도 저장"), key=f"{key_prefix}_accept"):
         _resume(session, "그래도 저장")
-    if col2.button("취소", key=f"{key_prefix}_cancel"):
+    if col2.button(L("취소"), key=f"{key_prefix}_cancel"):
         _resume(session, "취소")
 
 
@@ -330,24 +362,24 @@ def _render_new_relational_predicate(session, decision, key_prefix) -> None:
     independently)."""
     payload = decision.payload
     st.write(
-        f'"{payload["predicate"]}"라는 새로운 관계를 상태/관계 목록에 추가할까요? '
-        f'({payload.get("entity_id")} → {payload.get("target_id")})'
+        L('"{0}"라는 새로운 관계를 상태/관계 목록에 추가할까요? ({1} → {2})')
+        .format(payload["predicate"], payload.get("entity_id"), payload.get("target_id"))
     )
     if payload.get("reason"):
         st.caption(payload["reason"])
 
     col1, col2, col3 = st.columns(3)
-    if col1.button("저장", key=f"{key_prefix}_save"):
+    if col1.button(L("저장"), key=f"{key_prefix}_save"):
         _resume(session, {"action": "save"})
-    if col2.button("수정", key=f"{key_prefix}_edit_toggle"):
+    if col2.button(L("수정"), key=f"{key_prefix}_edit_toggle"):
         st.session_state[f"{key_prefix}_editing"] = True
         st.rerun()
-    if col3.button("취소", key=f"{key_prefix}_cancel"):
+    if col3.button(L("취소"), key=f"{key_prefix}_cancel"):
         _resume(session, {"action": "cancel"})
 
     if st.session_state.get(f"{key_prefix}_editing"):
-        new_name = st.text_input("새 이름", value=payload["predicate"], key=f"{key_prefix}_name")
-        if st.button("이 이름으로 저장", key=f"{key_prefix}_edit_confirm"):
+        new_name = st.text_input(L("새 이름"), value=payload["predicate"], key=f"{key_prefix}_name")
+        if st.button(L("이 이름으로 저장"), key=f"{key_prefix}_edit_confirm"):
             _resume(session, {"action": "edit", "name": new_name})
 
 
@@ -358,14 +390,14 @@ def _render_diff_review(session, decision, key_prefix) -> None:
     no edit here: 저장 applies everything, 취소 applies nothing."""
     payload = decision.payload
     st.write(f"**{payload['action'].upper()} {payload['category']}**: {payload['entity_id']}")
-    st.caption(f"근거: {payload['reason']}")
+    st.caption(L("근거: {0}").format(payload['reason']))
     st.json(payload["fields"])
     if payload["affected_entities"]:
-        st.caption("함께 갱신되는 엔티티: " + ", ".join(payload["affected_entities"]))
+        st.caption(L("함께 갱신되는 엔티티: ") + ", ".join(payload["affected_entities"]))
     col1, col2 = st.columns(2)
-    if col1.button("저장", key=f"{key_prefix}_save"):
+    if col1.button(L("저장"), key=f"{key_prefix}_save"):
         _resume(session, True)
-    if col2.button("취소", key=f"{key_prefix}_cancel"):
+    if col2.button(L("취소"), key=f"{key_prefix}_cancel"):
         _resume(session, False)
 
 
@@ -374,9 +406,9 @@ def _render_multi_event_warning(session, decision, key_prefix) -> None:
     comment) — this is purely an acknowledgment, not a choice between two
     outcomes that both do the same non-thing."""
     payload = decision.payload
-    st.warning(f"[확인 필요] {payload['reason']}")
-    st.caption("저장된 내용이 없습니다. 입력을 나눠서 다시 시도해주세요.")
-    if st.button("확인", key=f"{key_prefix}_ack"):
+    st.warning(L("[확인 필요] {0}").format(payload['reason']))
+    st.caption(L("저장된 내용이 없습니다. 입력을 나눠서 다시 시도해주세요."))
+    if st.button(L("확인"), key=f"{key_prefix}_ack"):
         _resume(session, None)
 
 
@@ -394,7 +426,7 @@ _DECISION_RENDERERS = {
 
 
 def render_chat_mode() -> None:
-    st.header("채팅")
+    st.header(L("채팅"))
 
     # Explicit mode toggle, not pattern detection (Phase 10 patch 22, A) —
     # a selectbox directly above the chat input is the closest native
@@ -402,14 +434,25 @@ def render_chat_mode() -> None:
     # another widget literally inside it). The two modes branch into
     # completely separate entry functions below; there is no shared
     # guessing logic anywhere for which one an input "looks like".
-    is_creator = st.selectbox(
-        "모드", ["일반 채팅", "Creator"], key="chat_mode_toggle", label_visibility="collapsed"
-    ) == "Creator"
+    # Translated options built up front + reverse-mapped back to the raw
+    # value, not format_func=L — see main()'s mode radio for why: a
+    # format_func that reads st.session_state breaks Streamlit's own
+    # AppTest harness (it invokes format_func outside any live script
+    # context on the run after a language switch).
+    _chat_mode_options = ["일반 채팅", "창작 모드"]
+    _chat_mode_display = [L(m) for m in _chat_mode_options]
+    chat_mode_choice = st.selectbox(
+        L("모드"), _chat_mode_display, key="chat_mode_toggle", label_visibility="collapsed"
+    )
+    is_creator = _chat_mode_options[_chat_mode_display.index(chat_mode_choice)] == "창작 모드"
     if is_creator:
         render_creator_mode()
         return
 
-    text = st.chat_input("사건을 입력하세요")
+    text = st.chat_input(
+        L("[ ]로 엔티티를 태그하고, 연도와 함께 사건이나 설정을 입력하세요 "
+          "(태그에 없는 새 이름을 쓰면 새 엔티티가 만들어집니다)")
+    )
     if text:
         st.session_state.chat_history.append({"role": "user", "content": text})
         st.session_state.session = pipeline_session.start_session(text)
@@ -453,7 +496,7 @@ def _render_creator_entity_candidates(session, decision, key_prefix) -> None:
     disambiguation, reused for GUI consistency — Creator always sends
     allow_create=False, so there's no "신규 작성" branch to render here."""
     payload = decision.payload
-    st.write(f'"{payload["tag"]}" 후보를 선택하세요:')
+    st.write(L('"{0}" 후보를 선택하세요:').format(payload["tag"]))
     for i, candidate_id in enumerate(payload["candidates"]):
         if st.button(candidate_id, key=f"{key_prefix}_cand_{i}"):
             _resume_creator(session, candidate_id)
@@ -462,45 +505,46 @@ def _render_creator_entity_candidates(session, decision, key_prefix) -> None:
 def _render_creator_year_confirm(session, decision, key_prefix) -> None:
     payload = decision.payload
     lower, upper = payload["lower"], payload["upper"]
-    st.write("이야기에 사용할 연도 범위를 확인해주세요.")
+    st.write(L("이야기에 사용할 연도 범위를 확인해주세요."))
     if lower is None and upper is None:
-        st.caption("관련 엔티티들의 존재 기간 정보가 없어 범위를 추정할 수 없습니다. 직접 입력해주세요.")
+        st.caption(L("관련 엔티티들의 존재 기간 정보가 없어 범위를 추정할 수 없습니다. 직접 입력해주세요."))
     elif upper is None:
-        st.caption(f"관련 엔티티들이 함께 존재하는 기간: {lower}년 이후 (현재까지 진행 중)")
+        st.caption(L("관련 엔티티들이 함께 존재하는 기간: {0}년 이후 (현재까지 진행 중)").format(lower))
     else:
-        st.caption(f"관련 엔티티들이 함께 존재하는 기간: {lower}년 ~ {upper}년")
+        st.caption(L("관련 엔티티들이 함께 존재하는 기간: {0}년 ~ {1}년").format(lower, upper))
 
     default_lower = lower if lower is not None else 0
     default_upper = upper if upper is not None else default_lower + 50
-    new_lower = st.number_input("시작 연도", value=default_lower, step=1, key=f"{key_prefix}_lower")
-    new_upper = st.number_input("종료 연도", value=default_upper, step=1, key=f"{key_prefix}_upper")
+    new_lower = st.number_input(L("시작 연도"), value=default_lower, step=1, key=f"{key_prefix}_lower")
+    new_upper = st.number_input(L("종료 연도"), value=default_upper, step=1, key=f"{key_prefix}_upper")
 
     col1, col2 = st.columns(2)
-    if col1.button("확인", key=f"{key_prefix}_confirm"):
+    if col1.button(L("확인"), key=f"{key_prefix}_confirm"):
         _resume_creator(session, {"action": "confirm", "lower": int(new_lower), "upper": int(new_upper)})
-    if col2.button("취소", key=f"{key_prefix}_cancel"):
+    if col2.button(L("취소"), key=f"{key_prefix}_cancel"):
         _resume_creator(session, {"action": "cancel"})
 
 
 def _render_creator_count_mismatch(session, decision, key_prefix) -> None:
     payload = decision.payload
     st.write(
-        f"이 이야기는 {payload['natural_event_count']}개의 사건으로 구성하는 게 자연스러워 보입니다.\n\n"
-        f"연도 범위를 다시 입력해주시겠어요, 아니면 지정하신 {payload['year']}년 근처로 압축해서 만들까요?"
+        L("이 이야기는 {0}개의 사건으로 구성하는 게 자연스러워 보입니다.\n\n"
+          "연도 범위를 다시 입력해주시겠어요, 아니면 지정하신 {1}년 근처로 압축해서 만들까요?")
+        .format(payload['natural_event_count'], payload['year'])
     )
     col1, col2, col3 = st.columns(3)
-    if col1.button("범위로 다시 입력", key=f"{key_prefix}_widen_toggle"):
+    if col1.button(L("범위로 다시 입력"), key=f"{key_prefix}_widen_toggle"):
         st.session_state[f"{key_prefix}_widening"] = True
         st.rerun()
-    if col2.button(f"{payload['year']}년 근처로 압축", key=f"{key_prefix}_compress"):
+    if col2.button(L("{0}년 근처로 압축").format(payload['year']), key=f"{key_prefix}_compress"):
         _resume_creator(session, {"action": "compress"})
-    if col3.button("취소", key=f"{key_prefix}_cancel"):
+    if col3.button(L("취소"), key=f"{key_prefix}_cancel"):
         _resume_creator(session, {"action": "cancel"})
 
     if st.session_state.get(f"{key_prefix}_widening"):
-        new_lower = st.number_input("시작 연도", value=payload["year"], step=1, key=f"{key_prefix}_lower")
-        new_upper = st.number_input("종료 연도", value=payload["year"] + 10, step=1, key=f"{key_prefix}_upper")
-        if st.button("이 범위로 진행", key=f"{key_prefix}_widen_confirm"):
+        new_lower = st.number_input(L("시작 연도"), value=payload["year"], step=1, key=f"{key_prefix}_lower")
+        new_upper = st.number_input(L("종료 연도"), value=payload["year"] + 10, step=1, key=f"{key_prefix}_upper")
+        if st.button(L("이 범위로 진행"), key=f"{key_prefix}_widen_confirm"):
             _resume_creator(session, {"action": "widen", "lower": int(new_lower), "upper": int(new_upper)})
 
 
@@ -509,54 +553,54 @@ def _render_creator_new_relational_predicate(session, decision, key_prefix) -> N
     registry gate, reused for GUI consistency."""
     payload = decision.payload
     st.write(
-        f'"{payload["predicate"]}"라는 새로운 관계를 상태/관계 목록에 추가할까요? '
-        f'({payload.get("entity_id")} → {payload.get("target_id")})'
+        L('"{0}"라는 새로운 관계를 상태/관계 목록에 추가할까요? ({1} → {2})')
+        .format(payload["predicate"], payload.get("entity_id"), payload.get("target_id"))
     )
     if payload.get("reason"):
         st.caption(payload["reason"])
 
     col1, col2, col3 = st.columns(3)
-    if col1.button("저장", key=f"{key_prefix}_save"):
+    if col1.button(L("저장"), key=f"{key_prefix}_save"):
         _resume_creator(session, {"action": "save"})
-    if col2.button("수정", key=f"{key_prefix}_edit_toggle"):
+    if col2.button(L("수정"), key=f"{key_prefix}_edit_toggle"):
         st.session_state[f"{key_prefix}_editing"] = True
         st.rerun()
-    if col3.button("취소", key=f"{key_prefix}_cancel"):
+    if col3.button(L("취소"), key=f"{key_prefix}_cancel"):
         _resume_creator(session, {"action": "cancel"})
 
     if st.session_state.get(f"{key_prefix}_editing"):
-        new_name = st.text_input("새 이름", value=payload["predicate"], key=f"{key_prefix}_name")
-        if st.button("이 이름으로 저장", key=f"{key_prefix}_edit_confirm"):
+        new_name = st.text_input(L("새 이름"), value=payload["predicate"], key=f"{key_prefix}_name")
+        if st.button(L("이 이름으로 저장"), key=f"{key_prefix}_edit_confirm"):
             _resume_creator(session, {"action": "edit", "name": new_name})
 
 
 def _render_creator_exhausted(session, decision, key_prefix) -> None:
     payload = decision.payload
-    st.warning(f"{payload['attempts']}회 시도했지만 검증을 통과하지 못했습니다.")
-    st.caption(f"마지막 반려 사유: {payload['reason']}")
+    st.warning(L("{0}회 시도했지만 검증을 통과하지 못했습니다.").format(payload['attempts']))
+    st.caption(L("마지막 반려 사유: {0}").format(payload['reason']))
     new_entities = payload.get("new_entities") or []
     if new_entities:
-        st.write("마지막 시도에서 생성될 뻔한 엔티티:")
+        st.write(L("마지막 시도에서 생성될 뻔한 엔티티:"))
         for ent in new_entities:
             st.write(f"- {ent['fields'].get('name') or ent['entity_id']} ({ent['category']})")
-    st.write("마지막으로 시도된 초안:")
+    st.write(L("마지막으로 시도된 초안:"))
     for e in payload["events"]:
         year = e["year"] if e["event_type"] == "point" else e["start_year"]
-        st.write(f"- [{e['event_type']}, {year}년] {e['notes']}")
+        st.write(L("- [{0}, {1}년] {2}").format(e['event_type'], year, e['notes']))
     col1, col2 = st.columns(2)
-    if col1.button("그래도 검토하기", key=f"{key_prefix}_keep"):
+    if col1.button(L("그래도 검토하기"), key=f"{key_prefix}_keep"):
         _resume_creator(session, {"action": "keep_anyway"})
-    if col2.button("포기", key=f"{key_prefix}_discard"):
+    if col2.button(L("포기"), key=f"{key_prefix}_discard"):
         _resume_creator(session, {"action": "discard"})
 
 
 def _render_creator_edit_conflict(session, decision, key_prefix) -> None:
     payload = decision.payload
-    st.warning(f"수정한 연도가 검증에 실패했습니다: {payload['reason']}")
+    st.warning(L("수정한 연도가 검증에 실패했습니다: {0}").format(payload['reason']))
     col1, col2 = st.columns(2)
-    if col1.button("그래도 저장", key=f"{key_prefix}_accept"):
+    if col1.button(L("그래도 저장"), key=f"{key_prefix}_accept"):
         _resume_creator(session, {"action": "save_anyway"})
-    if col2.button("돌아가기", key=f"{key_prefix}_back"):
+    if col2.button(L("돌아가기"), key=f"{key_prefix}_back"):
         _resume_creator(session, {"action": "back"})
 
 
@@ -571,7 +615,7 @@ def _render_creator_final_review(session, decision, key_prefix) -> None:
     payload = decision.payload
     new_entities = payload.get("new_entities") or []
     if new_entities:
-        st.write("**새로 생성될 엔티티**")
+        st.write(L("**새로 생성될 엔티티**"))
         for ent in new_entities:
             label = ent["fields"].get("name") or ent["entity_id"]
             st.write(f"- {label} ({ent['category']})")
@@ -579,32 +623,32 @@ def _render_creator_final_review(session, decision, key_prefix) -> None:
                 st.caption(ent["fields"]["notes"])
         st.divider()
 
-    st.write("**최종 검토** — 사건별로 연도를 확인/수정할 수 있습니다.")
+    st.write(L("**최종 검토** — 사건별로 연도를 확인/수정할 수 있습니다."))
     year_widgets = {}
     for e in payload["events"]:
         idx = e["index"]
         st.write(f"{idx + 1}. [{e['event_type']}] {e['notes']}")
         entries = []
         if e["event_type"] == "point":
-            new_year = st.number_input("연도", value=e["year"], step=1, key=f"{key_prefix}_year_{idx}")
+            new_year = st.number_input(L("연도"), value=e["year"], step=1, key=f"{key_prefix}_year_{idx}")
             entries.append(("year", e["year"], new_year))
         else:
             action = (e.get("duration_effect") or {}).get("action", "set")
             if action in ("set", "set_closed"):
                 new_start = st.number_input(
-                    "시작 연도", value=e["start_year"], step=1, key=f"{key_prefix}_start_{idx}"
+                    L("시작 연도"), value=e["start_year"], step=1, key=f"{key_prefix}_start_{idx}"
                 )
                 entries.append(("start_year", e["start_year"], new_start))
             if action in ("clear", "set_closed"):
                 new_end = st.number_input(
-                    "종료 연도", value=e["end_year"], step=1, key=f"{key_prefix}_end_{idx}"
+                    L("종료 연도"), value=e["end_year"], step=1, key=f"{key_prefix}_end_{idx}"
                 )
                 entries.append(("end_year", e["end_year"], new_end))
         year_widgets[idx] = entries
         st.divider()
 
     col1, col2, col3 = st.columns(3)
-    if col1.button("저장", key=f"{key_prefix}_save"):
+    if col1.button(L("저장"), key=f"{key_prefix}_save"):
         edits = {}
         for idx, entries in year_widgets.items():
             idx_edits = {}
@@ -617,7 +661,7 @@ def _render_creator_final_review(session, decision, key_prefix) -> None:
             if idx_edits:
                 edits[str(idx)] = idx_edits
         _resume_creator(session, {"action": "save", "year_edits": edits})
-    if col2.button("취소", key=f"{key_prefix}_cancel"):
+    if col2.button(L("취소"), key=f"{key_prefix}_cancel"):
         _resume_creator(session, {"action": "cancel"})
     if col3.button("Redo", key=f"{key_prefix}_redo_toggle"):
         st.session_state[f"{key_prefix}_redoing"] = True
@@ -625,11 +669,11 @@ def _render_creator_final_review(session, decision, key_prefix) -> None:
 
     if st.session_state.get(f"{key_prefix}_redoing"):
         supplement = st.text_input(
-            "[Redo] — 다시 만들 때 참고할 내용이 있나요? (선택, 비워둬도 됨)",
-            placeholder='예: "좀 더 잔인하게 해줘", "이벤트를 더 짧게 압축해줘"',
+            L("[Redo] — 다시 만들 때 참고할 내용이 있나요? (선택, 비워둬도 됨)"),
+            placeholder=L('예: "좀 더 잔인하게 해줘", "이벤트를 더 짧게 압축해줘"'),
             key=f"{key_prefix}_supplement",
         )
-        if st.button("재시도", key=f"{key_prefix}_redo_confirm"):
+        if st.button(L("재시도"), key=f"{key_prefix}_redo_confirm"):
             _resume_creator(session, {"action": "redo", "supplement": supplement})
 
 
@@ -647,20 +691,20 @@ _CREATOR_DECISION_RENDERERS = {
 def _describe_creator_result(result: dict) -> str:
     status = result.get("status")
     if status == "error":
-        return f"입력 오류: {result['message']}"
+        return L("입력 오류: {0}").format(result['message'])
     if status == "rejected":
-        return result.get("message", "요청을 처리할 수 없습니다.")
+        return result.get("message", L("요청을 처리할 수 없습니다."))
     if status == "cancelled":
-        return result.get("message") or "취소되었습니다."
+        return result.get("message") or L("취소되었습니다.")
     if status == "saved":
         applied = result.get("applied", [])
         creates = [c.entity_id for c in applied if c.action == "create" and c.category == "timeline"]
         new_entities = [c.entity_id for c in applied if c.action == "create" and c.category != "timeline"]
-        message = f"저장 완료: {len(creates)}개의 사건이 생성되었습니다. ({', '.join(creates)})"
+        message = L("저장 완료: {0}개의 사건이 생성되었습니다. ({1})").format(len(creates), ', '.join(creates))
         if new_entities:
-            message += f" 새로 생성된 엔티티: {', '.join(new_entities)}."
+            message += L(" 새로 생성된 엔티티: {0}.").format(', '.join(new_entities))
         return message
-    return "완료되었습니다."
+    return L("완료되었습니다.")
 
 
 def _render_new_entity_checkboxes() -> set:
@@ -681,11 +725,11 @@ def _render_new_entity_checkboxes() -> set:
     Streamlit does with the widget's own key in between."""
     stored = st.session_state.creator_new_entity_categories
     allowed = set()
-    with st.expander("+ 조연 엔티티 생성 허용"):
+    with st.expander(L("+ 조연 엔티티 생성 허용")):
         st.caption(
-            "체크한 카테고리에 한해 Creator가 필요하면 새로운 조연 엔티티를 만들 수 있습니다 "
-            "(예: '여러 사람' 대신 '카라반 마스터 밥'). 장소/사물/세력의 기존 항목은 이 설정과 "
-            "무관하게 항상 자연스럽게 활용됩니다 — 여기서는 새로 만드는 것만 켜고 끕니다."
+            L("체크한 카테고리에 한해 Creator가 필요하면 새로운 조연 엔티티를 만들 수 있습니다 "
+              "(예: '여러 사람' 대신 '카라반 마스터 밥'). 장소/사물/세력의 기존 항목은 이 설정과 "
+              "무관하게 항상 자연스럽게 활용됩니다 — 여기서는 새로 만드는 것만 켜고 끕니다.")
         )
         for category in creator.eligible_categories():
             checked = st.checkbox(
@@ -700,8 +744,8 @@ def _render_new_entity_checkboxes() -> set:
 def render_creator_mode() -> None:
     allowed_new_categories = _render_new_entity_checkboxes()
     text = st.chat_input(
-        "[ ]로 태그된 엔티티와 만들고 싶은 이야기를 입력하세요 "
-        "(예: [쟝]과 [미라]가 원수가 되는 이야기, 2100년에)"
+        L("[ ]로 태그된 엔티티와 만들고 싶은 이야기를 입력하세요 "
+          "(예: [쟝]과 [미라]가 원수가 되는 이야기, 2100년에)")
     )
     if text:
         st.session_state.creator_history.append({"role": "user", "content": text})
@@ -736,7 +780,7 @@ def render_sidebar_search() -> None:
     """Lives at the top of the sidebar regardless of which mode tab is
     active — searching and switching modes are independent actions, not
     alternatives, so this was pulled out of the mode dispatch entirely."""
-    query = st.sidebar.text_input("🔍 검색 (이름 일부)", key="global_search")
+    query = st.sidebar.text_input(L("🔍 검색 (이름 일부)"), key="global_search")
     if not query:
         return
 
@@ -747,7 +791,7 @@ def render_sidebar_search() -> None:
                 results.append((category, entity))
 
     if not results:
-        st.sidebar.caption("일치하는 엔티티가 없습니다.")
+        st.sidebar.caption(L("일치하는 엔티티가 없습니다."))
         return
 
     for category, entity in results:
@@ -764,9 +808,9 @@ def _dictionary_label(category: str, entity: dict) -> str:
     the one category with no `name` field at all (timeline)."""
     if category == "timeline":
         if entity.get("year") is not None:
-            return f"[{entity['year']}년] {entity.get('notes') or entity['id']}"
+            return f"[{entity['year']}{L('년')}] {entity.get('notes') or entity['id']}"
         start = entity.get("start_year")
-        span = f"{start}~{entity.get('end_year') or '현재'}" if start is not None else "?"
+        span = f"{start}~{entity.get('end_year') or L('현재')}" if start is not None else "?"
         predicate = entity.get("predicate") or ""
         return f"[{span}] {predicate} — {entity.get('notes') or entity['id']}"
     return entity.get("name") or entity["id"]
@@ -808,7 +852,7 @@ def _render_entity_fields(category: str, entity_id: str, entity: dict) -> None:
             st.write(f"**{name}**")
             _render_entity_link(value, key=f"reflink_{entity_id}_{name}")
         elif name == "event_ids":
-            st.write(f"**{name}** ({len(value)}건)")
+            st.write(L("**{0}** ({1}건)").format(name, len(value)))
             for i, eid in enumerate(value):
                 _render_entity_link(eid, key=f"reflink_{entity_id}_{name}_{i}")
         else:
@@ -835,7 +879,7 @@ def _render_timeline_participants(entity_id: str, entity: dict) -> None:
     ]
     if not participants:
         return
-    st.write("**참가자**")
+    st.write(L("**참가자**"))
     for i, eid in enumerate(participants):
         _render_entity_link(eid, key=f"reflink_{entity_id}_participants_{i}")
 
@@ -876,38 +920,38 @@ def _render_status_effects_panel() -> None:
     since these aren't entities — they never get their own id/detail
     screen, just this list."""
     st.write(
-        "세계관에서 쓸 수 있는, 되돌릴 수 있는 개인 상태(수감, 저주 등)와 대상이 있는 "
-        "관계형 predicate(추방, 적대 등)의 목록입니다. 새 사건 입력이나 필드 수정 화면에서 "
-        "바로 선택지로 나타납니다."
+        L("세계관에서 쓸 수 있는, 되돌릴 수 있는 개인 상태(수감, 저주 등)와 대상이 있는 "
+          "관계형 predicate(추방, 적대 등)의 목록입니다. 새 사건 입력이나 필드 수정 화면에서 "
+          "바로 선택지로 나타납니다.")
     )
 
     effects = schema.load_status_effects()
     pending = st.session_state.status_effect_confirm_delete
 
     for effect_type, type_label in _STATUS_EFFECT_TYPE_LABELS.items():
-        st.subheader(type_label)
+        st.subheader(L(type_label))
         typed_effects = [e for e in effects if e.get("type", "individual") == effect_type]
         if not typed_effects:
-            st.caption("(없음)")
+            st.caption(L("(없음)"))
 
         for effect in typed_effects:
             effect_id = effect["id"]
             col1, col2 = st.columns([4, 1])
             col1.write(f"**{effect_id}** ({effect['label']})")
 
-            with st.expander("설명 (LLM에게 이 상태/관계가 실제로 무엇을 뜻하는지 알려줍니다)"):
+            with st.expander(L("설명 (LLM에게 이 상태/관계가 실제로 무엇을 뜻하는지 알려줍니다)")):
                 notes_key = f"status_effect_notes_{effect_id}"
                 new_notes = st.text_area(
-                    "설명", value=effect.get("notes") or "", key=notes_key,
-                    placeholder="예: 물리적으로 수감 장소를 벗어난 행동은 불가능하다.",
+                    L("설명"), value=effect.get("notes") or "", key=notes_key,
+                    placeholder=L("예: 물리적으로 수감 장소를 벗어난 행동은 불가능하다."),
                 )
-                if st.button("설명 저장", key=f"status_effect_notes_save_{effect_id}"):
+                if st.button(L("설명 저장"), key=f"status_effect_notes_save_{effect_id}"):
                     schema.update_status_effect_notes(effect_id, new_notes)
-                    st.success("설명을 저장했습니다.")
+                    st.success(L("설명을 저장했습니다."))
                     st.rerun()
 
             if pending != effect_id:
-                if col2.button("삭제", key=f"status_effect_delete_{effect_id}"):
+                if col2.button(L("삭제"), key=f"status_effect_delete_{effect_id}"):
                     st.session_state.status_effect_confirm_delete = effect_id
                     st.rerun()
                 continue
@@ -915,41 +959,45 @@ def _render_status_effects_panel() -> None:
             usage = _status_effect_usage_count(effect_id, effect_type)
             if usage:
                 st.warning(
-                    f"현재 {usage}건의 기록이 이 항목을 사용하고 있습니다. 삭제해도 그 기록 "
-                    "자체는 남지만, 앞으로 선택지에 나타나지 않고 관련 검증 대상에서도 "
-                    "빠지게 됩니다."
+                    L("현재 {0}건의 기록이 이 항목을 사용하고 있습니다. 삭제해도 그 기록 "
+                      "자체는 남지만, 앞으로 선택지에 나타나지 않고 관련 검증 대상에서도 "
+                      "빠지게 됩니다.").format(usage)
                 )
             confirm_col1, confirm_col2 = st.columns(2)
-            if confirm_col1.button("그대로 삭제", key=f"status_effect_delete_confirm_{effect_id}"):
+            if confirm_col1.button(L("그대로 삭제"), key=f"status_effect_delete_confirm_{effect_id}"):
                 schema.remove_status_effect(effect_id)
                 st.session_state.status_effect_confirm_delete = None
-                st.success(f"'{effect_id}' 항목을 삭제했습니다.")
+                st.success(L("'{0}' 항목을 삭제했습니다.").format(effect_id))
                 st.rerun()
-            if confirm_col2.button("취소", key=f"status_effect_delete_cancel_{effect_id}"):
+            if confirm_col2.button(L("취소"), key=f"status_effect_delete_cancel_{effect_id}"):
                 st.session_state.status_effect_confirm_delete = None
                 st.rerun()
 
     st.divider()
-    st.subheader("새 항목 추가")
+    st.subheader(L("새 항목 추가"))
     with st.form("status_effect_add_form", clear_on_submit=True):
-        new_id = st.text_input("id (코드에서 predicate로 쓰일 값, 영문 권장)", key="status_effect_new_id")
-        new_label = st.text_input("표시 이름", key="status_effect_new_label")
+        new_id = st.text_input(L("id (코드에서 predicate로 쓰일 값, 영문 권장)"), key="status_effect_new_id")
+        new_label = st.text_input(L("표시 이름"), key="status_effect_new_label")
         new_type = st.selectbox(
-            "유형", list(_STATUS_EFFECT_TYPE_LABELS.values()), key="status_effect_new_type"
+            L("유형"), [L(v) for v in _STATUS_EFFECT_TYPE_LABELS.values()], key="status_effect_new_type"
         )
         new_notes = st.text_area(
-            "설명 (선택, LLM에게 실제 의미를 알려줍니다)", key="status_effect_new_notes",
-            placeholder="예: 물리적으로 수감 장소를 벗어난 행동은 불가능하다.",
+            L("설명 (선택, LLM에게 실제 의미를 알려줍니다)"), key="status_effect_new_notes",
+            placeholder=L("예: 물리적으로 수감 장소를 벗어난 행동은 불가능하다."),
         )
-        submitted = st.form_submit_button("추가", key="status_effect_add")
+        submitted = st.form_submit_button(L("추가"), key="status_effect_add")
     if submitted:
-        type_value = next(k for k, v in _STATUS_EFFECT_TYPE_LABELS.items() if v == new_type)
+        # new_type is whatever the selectbox displayed (translated), so the
+        # reverse lookup must translate each candidate the same way before
+        # comparing — matching against the raw Korean label directly would
+        # silently never match in English mode.
+        type_value = next(k for k, v in _STATUS_EFFECT_TYPE_LABELS.items() if L(v) == new_type)
         try:
             schema.add_status_effect(new_id, new_label, type_value, notes=new_notes)
         except ValueError as exc:
             st.error(str(exc))
         else:
-            st.success(f"'{new_id}' ({new_label}) 항목을 추가했습니다.")
+            st.success(L("'{0}' ({1}) 항목을 추가했습니다.").format(new_id, new_label))
             st.rerun()
 
 
@@ -962,11 +1010,11 @@ def render_dictionary_mode() -> None:
     back here always re-created the selectbox at its default (index 0,
     "character"). dict_category_persist lives outside any widget's
     lifecycle, so it survives the round trip and can drive `index=` here."""
-    st.header("딕셔너리")
+    st.header(L("딕셔너리"))
     categories = schema.list_categories() + [_STATUS_EFFECTS_PSEUDO_CATEGORY]
     remembered = st.session_state.dict_category_persist
     default_index = categories.index(remembered) if remembered in categories else 0
-    category = st.selectbox("카테고리", categories, index=default_index, key="dict_category")
+    category = st.selectbox(L("카테고리"), categories, index=default_index, key="dict_category")
     st.session_state.dict_category_persist = category
 
     if category == _STATUS_EFFECTS_PSEUDO_CATEGORY:
@@ -975,7 +1023,7 @@ def render_dictionary_mode() -> None:
 
     entities = storage.list_entities(category)
     if not entities:
-        st.write("이 카테고리에 등록된 엔티티가 없습니다.")
+        st.write(L("이 카테고리에 등록된 엔티티가 없습니다."))
         return
 
     for entity in entities:
@@ -1017,10 +1065,10 @@ def _render_relevant_context_section(entity_id: str, field_name: str) -> list:
     and find_relevant_context's LLM call has no reason to re-fire just
     because Streamlit reran the script with the same entity/field/value.
     """
-    st.subheader("관련 기록")
+    st.subheader(L("관련 기록"))
     matches = st.session_state.detail_relevant_matches
     if not matches:
-        st.write("관련성이 있어 보이는 기록이 없습니다.")
+        st.write(L("관련성이 있어 보이는 기록이 없습니다."))
         return matches
 
     show_all = st.session_state.detail_relevant_show_all
@@ -1033,15 +1081,15 @@ def _render_relevant_context_section(entity_id: str, field_name: str) -> list:
         col1, col2 = st.columns([1, 3])
         with col1:
             st.session_state.detail_flag_selection[match.entity_id] = st.checkbox(
-                "플래그", key=f"flag_{entity_id}_{field_name}_{match.entity_id}"
+                L("플래그"), key=f"flag_{entity_id}_{field_name}_{match.entity_id}"
             )
         with col2:
-            if st.button(f"{match.entity_id} 상세 보기", key=f"relctx_{entity_id}_{field_name}_{match.entity_id}"):
+            if st.button(L("{0} 상세 보기").format(match.entity_id), key=f"relctx_{entity_id}_{field_name}_{match.entity_id}"):
                 _navigate_to_entity(match.entity_id)
                 st.rerun()
 
     if remaining:
-        if st.button(f"더 보기 ({remaining}건 더 있음)", key=f"relctx_more_{entity_id}_{field_name}"):
+        if st.button(L("더 보기 ({0}건 더 있음)").format(remaining), key=f"relctx_more_{entity_id}_{field_name}"):
             st.session_state.detail_relevant_show_all = True
             st.rerun()
 
@@ -1052,8 +1100,8 @@ def _render_field_editor_section(category: str, entity_id: str, entity: dict) ->
     field_defs = [f for f in schema.get_fields(category) if f["name"] != "event_ids"]
     field_names = [f["name"] for f in field_defs]
 
-    st.subheader("필드 수정")
-    selected_field = st.selectbox("필드 선택", field_names, key="detail_field_select")
+    st.subheader(L("필드 수정"))
+    selected_field = st.selectbox(L("필드 선택"), field_names, key="detail_field_select")
 
     if st.session_state.detail_field_name != selected_field:
         _rollback_pending_structured_write()
@@ -1070,7 +1118,7 @@ def _render_field_editor_section(category: str, entity_id: str, entity: dict) ->
         field_def, entity.get(selected_field), key=f"detail_value_{entity_id}_{selected_field}"
     )
 
-    if st.button("필드 값 검토", key="detail_search"):
+    if st.button(L("필드 값 검토"), key="detail_search"):
         structured = field_update.is_structured_field(category, selected_field)
         if structured:
             storage.save_entity(category, entity_id, {selected_field: new_value})
@@ -1103,7 +1151,7 @@ def _render_field_editor_section(category: str, entity_id: str, entity: dict) ->
     warnings = [c for c in conflicts if c.severity == "warning"]
 
     if blocking:
-        st.error("하드체크 위반으로 저장할 수 없습니다:")
+        st.error(L("하드체크 위반으로 저장할 수 없습니다:"))
         for c in blocking:
             st.write(f"- [{c.check_type}] {c.entity_id}: {c.reason}")
     for c in warnings:
@@ -1114,7 +1162,7 @@ def _render_field_editor_section(category: str, entity_id: str, entity: dict) ->
         # recorded year" — hard_check already answers that above when it
         # fires. When it doesn't, say so explicitly instead of leaving a
         # blank gap where a warning would otherwise have been.
-        st.success("타임라인 충돌이 감지되지 않았습니다.")
+        st.success(L("타임라인 충돌이 감지되지 않았습니다."))
 
     # The actual "저장" button lives after the relevant-context section
     # below (see _render_save_section) — Phase 10 patch 11, A: flagging a
@@ -1136,7 +1184,7 @@ def _render_save_section(category: str, entity_id: str, selected_field: str) -> 
     blocking = [c for c in conflicts if c.severity == "blocking"]
     warnings = [c for c in conflicts if c.severity == "warning"]
 
-    if st.button("저장", key="detail_save", disabled=bool(blocking)):
+    if st.button(L("저장"), key="detail_save", disabled=bool(blocking)):
         if not field_update.is_structured_field(category, selected_field):
             storage.save_entity(category, entity_id, {selected_field: st.session_state.detail_new_value})
         if any(c.check_type == "lifespan" for c in warnings):
@@ -1151,9 +1199,9 @@ def _render_save_section(category: str, entity_id: str, selected_field: str) -> 
 
         flags.clear_flags_for_entity(entity_id)
 
-        message = "저장 완료."
+        message = L("저장 완료.")
         if flagged_count:
-            message += f" {flagged_count}건 플래그 등록."
+            message += L(" {0}건 플래그 등록.").format(flagged_count)
         st.success(message)
 
         st.session_state.detail_searched = False
@@ -1165,33 +1213,33 @@ def _render_save_section(category: str, entity_id: str, selected_field: str) -> 
 
 
 def _render_delete_entity_section(category: str, entity_id: str) -> None:
-    st.subheader("엔티티 삭제")
+    st.subheader(L("엔티티 삭제"))
     if not st.session_state.detail_confirm_delete:
-        if st.button("이 엔티티 삭제", key="detail_delete_start"):
+        if st.button(L("이 엔티티 삭제"), key="detail_delete_start"):
             st.session_state.detail_confirm_delete = True
             st.rerun()
         return
 
     events = deletion.request_entity_deletion(entity_id)
     if events:
-        st.write(f"이 엔티티가 관여한 이벤트 {len(events)}건도 함께 정리됩니다 (다른 엔티티가 "
-                 f"관여하지 않은 이벤트는 삭제, 관여했다면 이 엔티티의 포인터만 제거):")
+        st.write(L("이 엔티티가 관여한 이벤트 {0}건도 함께 정리됩니다 (다른 엔티티가 "
+                    "관여하지 않은 이벤트는 삭제, 관여했다면 이 엔티티의 포인터만 제거):").format(len(events)))
         for record in events:
             st.write(f"- {record['id']}: {record.get('notes') or ''}")
 
     col1, col2 = st.columns(2)
-    if col1.button("그대로 삭제 진행", key="detail_delete_confirm"):
+    if col1.button(L("그대로 삭제 진행"), key="detail_delete_confirm"):
         result = deletion.delete_entity(entity_id, category)
         st.session_state.detail_confirm_delete = False
         _navigate_to_entity(None)
-        message = f"{result.deleted_id} 삭제 완료."
+        message = L("{0} 삭제 완료.").format(result.deleted_id)
         if result.deleted_events:
-            message += f" 함께 삭제된 이벤트: {', '.join(result.deleted_events)}."
+            message += L(" 함께 삭제된 이벤트: {0}.").format(', '.join(result.deleted_events))
         if result.affected_entities:
-            message += f" 포인터가 갱신된 엔티티: {', '.join(result.affected_entities)}."
+            message += L(" 포인터가 갱신된 엔티티: {0}.").format(', '.join(result.affected_entities))
         st.success(message)
         st.rerun()
-    if col2.button("취소 (유지)", key="detail_delete_cancel"):
+    if col2.button(L("취소 (유지)"), key="detail_delete_cancel"):
         st.session_state.detail_confirm_delete = False
         st.rerun()
 
@@ -1248,41 +1296,41 @@ def _render_timeline_detail(entity_id: str, entity: dict) -> None:
     else:
         previous_participants = [p for p in (entity.get("entity"), entity.get("target")) if p]
 
-    st.subheader("이벤트 수정")
+    st.subheader(L("이벤트 수정"))
     if is_point:
-        new_year = st.number_input("연도", value=entity.get("year"), step=1, key=f"tl_year_{entity_id}")
+        new_year = st.number_input(L("연도"), value=entity.get("year"), step=1, key=f"tl_year_{entity_id}")
         loc_options = [(f'{e.get("name") or e["id"]}', e["id"]) for e in storage.list_entities("location")]
         loc_ids = [eid for _label, eid in loc_options]
-        loc_labels = ["(없음)"] + [label for label, _eid in loc_options]
+        loc_labels = [L("(없음)")] + [label for label, _eid in loc_options]
         loc_index = loc_ids.index(entity.get("location")) + 1 if entity.get("location") in loc_ids else 0
-        loc_choice = st.selectbox("장소", loc_labels, index=loc_index, key=f"tl_loc_{entity_id}")
-        new_location = None if loc_choice == "(없음)" else loc_ids[loc_labels.index(loc_choice) - 1]
+        loc_choice = st.selectbox(L("장소"), loc_labels, index=loc_index, key=f"tl_loc_{entity_id}")
+        new_location = None if loc_choice == L("(없음)") else loc_ids[loc_labels.index(loc_choice) - 1]
 
         selected_participants = st.multiselect(
-            "참가자", candidates, default=[p for p in previous_participants if p in candidates],
+            L("참가자"), candidates, default=[p for p in previous_participants if p in candidates],
             format_func=lambda eid: labels_by_id.get(eid, eid), key=f"tl_participants_{entity_id}",
         )
     else:
-        new_start = st.number_input("시작 연도", value=entity.get("start_year"), step=1, key=f"tl_start_{entity_id}")
-        new_end = st.number_input("종료 연도 (비워두면 현재도 진행 중)", value=entity.get("end_year"), step=1, key=f"tl_end_{entity_id}")
-        new_predicate = st.text_input("predicate (상태/관계 이름)", value=entity.get("predicate") or "", key=f"tl_pred_{entity_id}")
+        new_start = st.number_input(L("시작 연도"), value=entity.get("start_year"), step=1, key=f"tl_start_{entity_id}")
+        new_end = st.number_input(L("종료 연도 (비워두면 현재도 진행 중)"), value=entity.get("end_year"), step=1, key=f"tl_end_{entity_id}")
+        new_predicate = st.text_input(L("predicate (상태/관계 이름)"), value=entity.get("predicate") or "", key=f"tl_pred_{entity_id}")
         entity_index = candidates.index(entity.get("entity")) if entity.get("entity") in candidates else 0
         new_entity = st.selectbox(
-            "주체 (entity)", candidates, index=entity_index,
+            L("주체 (entity)"), candidates, index=entity_index,
             format_func=lambda eid: labels_by_id.get(eid, eid), key=f"tl_entity_{entity_id}",
         ) if candidates else None
-        target_labels = ["(없음)"] + [labels_by_id[eid] for eid in candidates]
+        target_labels = [L("(없음)")] + [labels_by_id[eid] for eid in candidates]
         target_index = candidates.index(entity.get("target")) + 1 if entity.get("target") in candidates else 0
-        target_choice = st.selectbox("대상 (target, 관계형일 때만)", target_labels, index=target_index, key=f"tl_target_{entity_id}")
-        new_target = None if target_choice == "(없음)" else candidates[target_labels.index(target_choice) - 1]
+        target_choice = st.selectbox(L("대상 (target, 관계형일 때만)"), target_labels, index=target_index, key=f"tl_target_{entity_id}")
+        new_target = None if target_choice == L("(없음)") else candidates[target_labels.index(target_choice) - 1]
         selected_participants = [p for p in (new_entity, new_target) if p]
 
-    new_notes = st.text_area("비고", value=entity.get("notes") or "", key=f"tl_notes_{entity_id}")
+    new_notes = st.text_area(L("비고"), value=entity.get("notes") or "", key=f"tl_notes_{entity_id}")
 
     review_key = f"tl_reviewed_{entity_id}"
     pending_key = f"tl_pending_{entity_id}"
 
-    if st.button("변경사항 검토", key=f"tl_review_{entity_id}"):
+    if st.button(L("변경사항 검토"), key=f"tl_review_{entity_id}"):
         if is_point:
             fields = {"year": int(new_year) if new_year is not None else None, "location": new_location, "notes": new_notes}
         else:
@@ -1296,12 +1344,12 @@ def _render_timeline_detail(entity_id: str, entity: dict) -> None:
         st.session_state[review_key] = True
         st.rerun()
 
-    st.subheader("이벤트 삭제")
-    if st.button("이 이벤트 삭제", key=f"tl_delete_{entity_id}"):
+    st.subheader(L("이벤트 삭제"))
+    if st.button(L("이 이벤트 삭제"), key=f"tl_delete_{entity_id}"):
         result = deletion.delete_event(entity_id)
-        message = f"{result.deleted_id} 삭제 완료."
+        message = L("{0} 삭제 완료.").format(result.deleted_id)
         if result.affected_entities:
-            message += " 포인터가 제거된 엔티티: " + ", ".join(result.affected_entities)
+            message += L(" 포인터가 제거된 엔티티: {0}").format(", ".join(result.affected_entities))
         st.success(message)
         _navigate_to_entity(None)
         st.rerun()
@@ -1327,15 +1375,15 @@ def _render_timeline_detail(entity_id: str, entity: dict) -> None:
     blocking = [c for c in conflicts if c.severity == "blocking"]
     warnings = [c for c in conflicts if c.severity == "warning"]
     if blocking:
-        st.error("하드체크 위반으로 저장할 수 없습니다:")
+        st.error(L("하드체크 위반으로 저장할 수 없습니다:"))
         for c in blocking:
             st.write(f"- [{c.check_type}] {c.entity_id}: {c.reason}")
     for c in warnings:
         st.warning(f"[{c.check_type}] {c.entity_id}: {c.reason}")
     if not conflicts:
-        st.success("하드체크 충돌이 감지되지 않았습니다.")
+        st.success(L("하드체크 충돌이 감지되지 않았습니다."))
 
-    if st.button("저장", key=f"tl_save_{entity_id}", disabled=bool(blocking)):
+    if st.button(L("저장"), key=f"tl_save_{entity_id}", disabled=bool(blocking)):
         storage.save_entity("timeline", entity_id, pending["fields"])
         storage.save_to_chroma(entity_id, pending["fields"].get("notes") or "", {"category": "timeline"})
 
@@ -1349,7 +1397,7 @@ def _render_timeline_detail(entity_id: str, entity: dict) -> None:
 
         st.session_state.pop(review_key, None)
         st.session_state.pop(pending_key, None)
-        st.success("이벤트가 갱신되었습니다.")
+        st.success(L("이벤트가 갱신되었습니다."))
         st.rerun()
 
 
@@ -1375,7 +1423,7 @@ def _render_entity_timeline(entity_id: str) -> None:
 
     entries = visualization.build_timeline(entity_id)
     if not entries:
-        st.write("이 엔티티와 관련된 사건이 없습니다.")
+        st.write(L("이 엔티티와 관련된 사건이 없습니다."))
         return
 
     point_entries = [e for e in entries if e.kind == "point"]
@@ -1405,14 +1453,14 @@ def _render_entity_timeline(entity_id: str) -> None:
             span_label = f"{start}~{end}"
         elif ref["end"] is not None:
             end = max(bound_year, start)
-            suffix = " (대상 소멸로 종료)"
+            suffix = L(" (대상 소멸로 종료)")
             color = "#2a78d6"
-            span_label = f"{start}~{bound_year} (대상 소멸로 종료)"
+            span_label = f"{start}~{bound_year}" + L(" (대상 소멸로 종료)")
         else:
             end = max(bound_year, start)
-            suffix = " (진행중)"
+            suffix = L(" (진행중)")
             color = "#9ec5f4"
-            span_label = f"{start}~ (마지막 기록: {bound_year}년)"
+            span_label = f"{start}~" + L(" (마지막 기록: {0}년)").format(bound_year)
         fig.add_trace(
             go.Bar(
                 x=[max(end - start, 0.5)],
@@ -1451,17 +1499,17 @@ def _render_entity_timeline(entity_id: str) -> None:
         for year in years_sorted:
             group = by_year[year]
             if len(group) == 1:
-                hover_texts.append(f"{year}년, 사건: {group[0].label}")
+                hover_texts.append(L("{0}년, 사건: {1}").format(year, group[0].label))
                 customdata.append(group[0].event_id)
             else:
                 lines = "<br>".join(f"• {e.label}" for e in group)
-                hover_texts.append(f"{year}년, {len(group)}개 사건:<br>{lines}")
+                hover_texts.append(L("{0}년, {1}개 사건:").format(year, len(group)) + f"<br>{lines}")
                 customdata.append(None)
 
         fig.add_trace(
             go.Scatter(
                 x=years_sorted,
-                y=["사건"] * len(years_sorted),
+                y=[L("사건")] * len(years_sorted),
                 mode="markers",
                 customdata=customdata,
                 hovertext=hover_texts,
@@ -1473,14 +1521,20 @@ def _render_entity_timeline(entity_id: str) -> None:
 
     for line, dash in ((ref["start"], "dot"), (ref["end"], "dot"), (ref["cutoff"], "dash")):
         if line is not None:
+            # visualization.py deliberately has no i18n import of its own
+            # (kept GUI-framework-free by design) — L() here is a no-op for
+            # a real schema field name (birth_year, founded_year, ...),
+            # since those never match a dictionary entry, and only
+            # translates the two UI-generated guess labels ("마지막 이벤트",
+            # "첫 기록") that actually are.
             fig.add_vline(
                 x=line.year, line_dash=dash, line_color="#898781",
-                annotation_text=f"{line.label}: {line.year}", annotation_position="top",
+                annotation_text=f"{L(line.label)}: {line.year}", annotation_position="top",
                 annotation_textangle=0,
             )
 
     fig.update_layout(
-        xaxis_title="연도",
+        xaxis_title=L("연도"),
         height=max(300, 70 * (len(duration_entries) + 1)),
         margin=dict(l=10, r=10, t=50, b=10),
     )
@@ -1506,7 +1560,7 @@ def _render_entity_timeline(entity_id: str) -> None:
             # silently doing nothing, using the clicked point's own x
             # (the year) to look the group back up.
             group = by_year[points[0]["x"]]
-            st.info(f"{points[0]['x']}년에 사건이 {len(group)}개 있습니다. 이동할 사건을 선택하세요:")
+            st.info(L("{0}년에 사건이 {1}개 있습니다. 이동할 사건을 선택하세요:").format(points[0]['x'], len(group)))
             for ge in group:
                 if st.button(ge.label, key=f"timeline_pick_{entity_id}_{ge.event_id}"):
                     _navigate_to_entity(ge.event_id)
@@ -1526,10 +1580,10 @@ def _render_relationship_graph(entity_id: str) -> None:
     weights = visualization.compute_neighbor_weights(entity_id)
 
     if not weights:
-        st.write("1-hop으로 연결된 엔티티가 없습니다.")
+        st.write(L("1-hop으로 연결된 엔티티가 없습니다."))
         return
 
-    st.write("**카테고리 필터**")
+    st.write(L("**카테고리 필터**"))
     categories = visualization.filterable_categories()
     selected_categories = set()
     if categories:
@@ -1547,7 +1601,7 @@ def _render_relationship_graph(entity_id: str) -> None:
     max_weight = max(weights.values())
     if max_weight > 1:
         min_weight = st.slider(
-            "최소 연결 횟수", min_value=1, max_value=max_weight, value=1,
+            L("최소 연결 횟수"), min_value=1, max_value=max_weight, value=1,
             key=f"graph_minweight_{entity_id}",
         )
     else:
@@ -1557,7 +1611,7 @@ def _render_relationship_graph(entity_id: str) -> None:
         entity_id, weights, selected_categories, min_weight
     )
     if not nodes_data:
-        st.write("조건에 맞는 연결된 엔티티가 없습니다.")
+        st.write(L("조건에 맞는 연결된 엔티티가 없습니다."))
         return
 
     # Legend first (dataviz skill non-negotiable: identity is never
@@ -1600,15 +1654,15 @@ def _render_relationship_graph(entity_id: str) -> None:
 def render_entity_detail(entity_id: str) -> None:
     category = schema.category_from_id(entity_id)
     if category is None:
-        st.error(f"알 수 없는 entity_id입니다: {entity_id}")
+        st.error(L("알 수 없는 entity_id입니다: {0}").format(entity_id))
         return
     entity = storage.get_entity(category, entity_id)
     if entity is None:
-        st.error(f"존재하지 않는 엔티티입니다: {entity_id}")
+        st.error(L("존재하지 않는 엔티티입니다: {0}").format(entity_id))
         return
 
     st.header(f"{entity.get('name') or entity_id} ({entity_id})")
-    if st.button("← 목록으로", key="detail_back"):
+    if st.button(L("← 목록으로"), key="detail_back"):
         _navigate_to_entity(None)
         st.rerun()
 
@@ -1620,16 +1674,16 @@ def render_entity_detail(entity_id: str) -> None:
         # visualization tabs are deliberately not offered here either — a
         # raw timeline record has no timeline/relationship graph of its
         # own to show.
-        st.subheader("현재 필드 값")
+        st.subheader(L("현재 필드 값"))
         _render_entity_fields(category, entity_id, entity)
         _render_timeline_participants(entity_id, entity)
         _render_timeline_detail(entity_id, entity)
         return
 
-    info_tab, viz_tab = st.tabs(["정보/수정", "시각화"])
+    info_tab, viz_tab = st.tabs([L("정보/수정"), L("시각화")])
 
     with info_tab:
-        st.subheader("현재 필드 값")
+        st.subheader(L("현재 필드 값"))
         _render_entity_fields(category, entity_id, entity)
         _render_field_editor_section(category, entity_id, entity)
 
@@ -1652,7 +1706,7 @@ def render_entity_detail(entity_id: str) -> None:
         _render_delete_entity_section(category, entity_id)
 
     with viz_tab:
-        timeline_tab, graph_tab = st.tabs(["타임라인", "관계도"])
+        timeline_tab, graph_tab = st.tabs([L("타임라인"), L("관계도")])
         with timeline_tab:
             _render_entity_timeline(entity_id)
         with graph_tab:
@@ -1668,10 +1722,26 @@ def main() -> None:
     _init_session_state()
 
     st.sidebar.title("Lore Builder")
+    st.sidebar.selectbox(
+        "Language / 언어",
+        ["ko", "en"],
+        format_func=lambda code: "한국어" if code == "ko" else "English",
+        key="interface_language",
+    )
     render_sidebar_search()
     st.sidebar.divider()
 
-    mode = st.sidebar.radio("모드", ["채팅", "딕셔너리"], key="mode")
+    # format_func=L would read interface_language via st.session_state on
+    # every invocation, including ones Streamlit's own testing harness makes
+    # outside a live script run (no ScriptRunContext there) — that path sees
+    # stale/default state and can desync the widget's displayed vs. stored
+    # options. Building the translated list up front and reverse-mapping
+    # keeps format_func itself state-free, sidestepping that entirely (same
+    # pattern as the status-effect type selectbox below).
+    _mode_options = ["채팅", "딕셔너리"]
+    _mode_display = [L(m) for m in _mode_options]
+    mode_choice = st.sidebar.radio(L("모드"), _mode_display, key="mode")
+    mode = _mode_options[_mode_display.index(mode_choice)]
 
     # Phase 9 patch E: clicking a different mode tab must win over "an
     # entity detail screen happens to be open" — previously the
@@ -1682,12 +1752,12 @@ def main() -> None:
         _navigate_to_entity(None)
     st.session_state._last_mode = mode
 
-    with st.sidebar.expander("🚩 플래그 확인"):
+    with st.sidebar.expander(L("🚩 플래그 확인")):
         deduped = flags.list_flags_deduped()
         if not deduped:
-            st.write("플래그된 항목이 없습니다.")
+            st.write(L("플래그된 항목이 없습니다."))
         for flag in deduped:
-            label = flag.reason or "(사유 없음)"
+            label = flag.reason or L("(사유 없음)")
             if st.button(f"{flag.entity_id} — {label}", key=f"flagnav_{flag.id}"):
                 _navigate_to_entity(flag.entity_id)
                 st.rerun()
@@ -1701,7 +1771,7 @@ def main() -> None:
     elif mode == "딕셔너리":
         render_dictionary_mode()
     else:
-        st.info("시각화 모드는 곧 추가될 예정입니다.")
+        st.info(L("시각화 모드는 곧 추가될 예정입니다."))
 
 
 if __name__ == "__main__":

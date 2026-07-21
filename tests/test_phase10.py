@@ -42,7 +42,7 @@ def test_parse_input_extracts_only_the_year_outside_brackets():
 # ---------------------------------------------------------------------------
 
 def test_infer_event_duration_set():
-    result = inference.infer_event({"쟝": "char_jang"}, "쟝이 2000년에 봉인되었다.", [2000])
+    result = inference.infer_event({"쟝": "char_쟝"}, "쟝이 2000년에 봉인되었다.", [2000])
 
     assert result.is_single_event
     assert result.event_type == "duration"
@@ -53,7 +53,7 @@ def test_infer_event_duration_set():
 
 
 def test_infer_event_duration_clear():
-    result = inference.infer_event({"쟝": "char_jang"}, "쟝이 2010년에 봉인에서 풀려났다.", [2010])
+    result = inference.infer_event({"쟝": "char_쟝"}, "쟝이 2010년에 봉인에서 풀려났다.", [2010])
 
     assert result.is_single_event
     assert result.event_type == "duration"
@@ -63,7 +63,7 @@ def test_infer_event_duration_clear():
 
 def test_infer_event_duration_set_closed():
     result = inference.infer_event(
-        {"쟝": "char_jang"}, "쟝은 2000년부터 2010년까지 봉인되었다.", [2000, 2010]
+        {"쟝": "char_쟝"}, "쟝은 2000년부터 2010년까지 봉인되었다.", [2000, 2010]
     )
 
     assert result.is_single_event
@@ -74,7 +74,7 @@ def test_infer_event_duration_set_closed():
 
 
 def test_infer_event_point_for_mundane_action():
-    resolved = {"쟝": "char_jang", "검은 염소 주점": "loc_black_goat_inn"}
+    resolved = {"쟝": "char_쟝", "검은 염소 주점": "loc_검은_염소_주점"}
     result = inference.infer_event(resolved, "쟝이 주점에서 술을 마셨다.", [2100])
 
     assert result.is_single_event
@@ -82,7 +82,7 @@ def test_infer_event_point_for_mundane_action():
 
 
 def test_infer_event_marks_ambiguous_multi_subject_sentence():
-    resolved = {"쟝": "char_jang", "늙은 왕": "char_old_king"}
+    resolved = {"쟝": "char_쟝", "늙은 왕": "char_늙은_왕"}
     result = inference.infer_event(
         resolved, "쟝이 2080년에 술을 마셨고, 늙은 왕이 1550년에 죽었다.", [1550, 2080]
     )
