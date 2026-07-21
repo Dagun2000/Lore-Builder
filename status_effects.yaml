@@ -3,18 +3,16 @@ status_effects:
   label: 봉인
   type: individual
   notes: 봉인된 대상은 스스로의 힘/능력을 사용하거나 자유롭게 활동할 수 없다. 봉인이 해제되어야만 원래대로 돌아온다.
-- id: imprisoned
-  label: 수감
-  type: individual
-  notes: 물리적으로 수감 장소를 벗어난 행동(다른 지역 방문, 자유로운 이동 등)은 불가능하다. 감방 안에서의 행동(대화, 생각, 식사 등)은 가능하다.
 - id: missing
   label: 실종
   type: individual
-  notes: 실종된 인물의 생사나 행방은 알려지지 않은 상태다. 실종 중에는 목격되거나 활동한 것으로 서술될 수 없다 — 다시 나타나거나 발견되어야 실종이 해제된다.
+  notes: 실종된 인물의 생사나 행방은 알려지지 않은 상태다. 실종 중에는 목격되거나 활동한 것으로 서술될 수 없다 — 다시 나타나거나 발견되어야
+    실종이 해제된다.
 - id: cursed
   label: 저주받음
   type: individual
-  notes: 저주받은 대상은 저주의 구체적 내용에 명시된 제약이나 불이익을 겪는다. 저주가 정확히 무엇을 유발하는지는 사건 문장이나 별도 설정을 따른다.
+  notes: 저주받은 대상은 저주의 구체적 내용에 명시된 제약이나 불이익을 겪는다. 저주가 정확히 무엇을 유발하는지는 사건 문장이나 별도 설정을
+    따른다.
 - id: incapacitated
   label: 부상/중태
   type: individual
@@ -38,7 +36,8 @@ status_effects:
 - id: enemies_with
   label: enemies_with
   type: relational
-  notes: 서로 적대적인 관계다. 화해 등으로 관계가 바뀌면 이 기록을 먼저 해제(clear)하고 새로운 관계를 시작해야 한다 — 옆에 별개로 새 관계만 추가하면 안 된다.
+  notes: 서로 적대적인 관계다. 화해 등으로 관계가 바뀌면 이 기록을 먼저 해제(clear)하고 새로운 관계를 시작해야 한다 — 옆에 별개로
+    새 관계만 추가하면 안 된다.
 - id: champion_of
   label: champion_of
   type: relational
@@ -50,7 +49,8 @@ status_effects:
 - id: owns
   label: owns
   type: relational
-  notes: 해당 사물을 실제로 소유하고 있다. 그 사물을 사용/착용/휘두르는 행동은 이 상태가 활성일 때만 앞뒤가 맞는다 — 분실하거나 양도하면 반드시 해제(clear)해야 한다.
+  notes: 해당 사물을 실제로 소유하고 있다. 그 사물을 사용/착용/휘두르는 행동은 이 상태가 활성일 때만 앞뒤가 맞는다 — 분실하거나 양도하면
+    반드시 해제(clear)해야 한다.
 - id: controls
   label: controls
   type: relational
@@ -58,8 +58,13 @@ status_effects:
 - id: knows
   label: knows
   type: relational
-  notes: 서로 아는 사이다 — 최소한 한 번은 만난 적이 있다는 사실을 못박는 관계다. 이 기록의 시작 연도보다 이전 시점에 둘이 함께 등장하는 사건은 성립할 수 없다.
+  notes: 서로 아는 사이다 — 최소한 한 번은 만난 적이 있다는 사실을 못박는 관계다. 이 기록의 시작 연도보다 이전 시점에 둘이 함께 등장하는
+    사건은 성립할 수 없다.
 - id: founder_of
   label: founder_of
   type: relational
   notes: 해당 세력/장소를 처음 창설·건국한 인물이다. 과거의 확정된 사실이므로 보통 해제되지 않는다.
+- id: imprisoned
+  label: 수감
+  type: relational
+  notes: 특정 장소에 갇힌 상태. 자유로운 이동이 불가능하다.

@@ -77,14 +77,40 @@ def get_relationship_weight(entity_id: str, other_entity_id: str) -> int:
     return sum(1 for e in events if other_entity_id in get_participants(e))
 
 
-def compute_neighbor_weights(entity_id: str) -> dict:
+def _event_active_at(event: dict, year: int) -> bool:
+    """Whether `event` counts as an existing connection as of `year` — a
+    duration record (a relationship/status) only counts while active
+    (start_year <= year <= end_year, or still ongoing if end_year is
+    unset); a point record is a one-time fact that, once it's happened,
+    stays true forever after (counts for any year >= its own), the same
+    "no expiry once started" idea an open-ended duration already gets."""
+    if event.get("entity"):
+        start = event.get("start_year")
+        if start is None or year < start:
+            return False
+        end = event.get("end_year")
+        return end is None or year <= end
+    point_year = event.get("year")
+    return point_year is not None and point_year <= year
+
+
+def compute_neighbor_weights(entity_id: str, as_of_year: int | None = None) -> dict:
     """{other_entity_id: shared_event_count} for every 1-hop neighbor of
     entity_id, in one pass over entity_id's own events (each event's
     participants are computed once, not once per candidate neighbor —
     same counts as calling get_relationship_weight for every neighbor,
-    just without the redundant rescans)."""
+    just without the redundant rescans).
+
+    `as_of_year`, when given, drops any event not yet "existing" at that
+    year (see `_event_active_at`) before counting it — the graph has no
+    fixed "now" any more than the rest of this app does, so a relationship
+    that's already ended, or a fact that hasn't happened yet as of the
+    year being looked at, shouldn't still show up just because it exists
+    somewhere on the full timeline."""
     weights: dict = {}
     for event in storage.get_events_for_entity(entity_id):
+        if as_of_year is not None and not _event_active_at(event, as_of_year):
+            continue
         for other_id in get_participants(event):
             if other_id == entity_id:
                 continue
@@ -208,18 +234,29 @@ def build_timeline(entity_id: str) -> list:
 
 
 # A duration event that's the chronologically last thing on record and
-# still open gets this much daylight past its own start_year when there's
-# no other way to bound it — otherwise it would render as a zero-length
-# stub the moment it started (this is what a bare global "latest year"
-# reference used to do whenever an entity's own newest event happened to
-# BE that global latest year — found via direct testing/user feedback,
-# not anticipated up front).
-_OPEN_DURATION_CUTOFF_BUFFER = 2
+# still open needs *some* pixel of daylight past its own start_year to
+# plot as a visible sliver rather than a zero-width stub — but that
+# daylight is a rendering nudge, not a fact, so it must never leak into
+# anything a human reads as "the year" (the cutoff's own label, or the
+# relationship graph's year-slider bound): those read ReferenceLine.year
+# (the real start_year, untouched), while only the plotted x-coordinate
+# reads ReferenceLine.x (year + this buffer). A whole +2 years used to be
+# applied to both alike, which is what made a duration event that started
+# in (say) 2085 both plot AND *display* as if something dated "2087" had
+# happened — this buffer only needs to be big enough for the bar's own
+# `max(end - start, 0.5)` width floor (see _render_entity_timeline) to
+# never have to stretch it further, so it stays this small on purpose.
+_OPEN_DURATION_CUTOFF_BUFFER = 0.5
 
 
 @dataclass
 class ReferenceLine:
-    year: int
+    year: int  # the real fact — always what gets displayed as "the year"
+               # (a label, a slider bound, an axis annotation)
+    x: float  # where this line/bound actually plots on the year axis —
+              # equal to `year` for every real fact; only the duration-
+              # flavored "cutoff" guess offsets it (see
+              # _OPEN_DURATION_CUTOFF_BUFFER above)
     label: str  # the raw schema field name (birth_year, founded_year, ...)
                 # or "마지막 이벤트" for a cutoff guess — no separate
                 # i18n/friendly-name layer exists for field names anywhere
@@ -253,15 +290,20 @@ def resolve_timeline_reference(entity_id: str) -> dict:
     would bound an open-ended bar in that case. It's based on entity_id's
     own chronologically LAST recorded event (get_events_for_entity's own
     sort order, so entries[-1]): if that event is a point event, the
-    cutoff is just its year (a known fact); if it's a duration event, the
-    cutoff is its start_year plus _OPEN_DURATION_CUTOFF_BUFFER (a guess,
-    not a fact — is_guess=True), so a duration that only just started
-    still renders as a visible bar instead of a zero-length stub. This
-    replaces an earlier version that used the single latest year recorded
-    anywhere in the WHOLE timeline table as a shared "now" — that looked
-    fine until an entity's own newest event happened to equal that global
-    value, which produced exactly the zero-length-stub bug this buffer
-    exists to avoid (caught from a real screenshot, not anticipated)."""
+    cutoff is just its year (a known fact, x == year); if it's a duration
+    event, the cutoff's *label* stays that event's own real start_year,
+    while its *plotted x* gets _OPEN_DURATION_CUTOFF_BUFFER added on top
+    purely so a duration that only just started still renders as a
+    visible bar instead of a zero-length stub — is_guess=True either way.
+    This replaces an earlier version that used the single latest year
+    recorded anywhere in the WHOLE timeline table as a shared "now" — that
+    looked fine until an entity's own newest event happened to equal that
+    global value, which produced exactly the zero-length-stub bug this
+    buffer exists to avoid (caught from a real screenshot, not
+    anticipated). A later revision found the buffer itself creating a
+    *different* confusion — a duration event that started in 2085 both
+    plotting AND labeling as if "2087" were a real date — which is why
+    the label/plot split above exists at all."""
     category = schema.category_from_id(entity_id)
     entity = storage.get_entity(category, entity_id) if category else None
     result = {"start": None, "end": None, "cutoff": None}
@@ -270,12 +312,12 @@ def resolve_timeline_reference(entity_id: str) -> dict:
         if start_fields:
             value = entity.get(start_fields[0]["name"])
             if value is not None:
-                result["start"] = ReferenceLine(year=value, label=start_fields[0]["name"], is_guess=False)
+                result["start"] = ReferenceLine(year=value, x=value, label=start_fields[0]["name"], is_guess=False)
         end_fields = schema.get_fields_with_role(category, "lifecycle_end")
         if end_fields:
             value = entity.get(end_fields[0]["name"])
             if value is not None:
-                result["end"] = ReferenceLine(year=value, label=end_fields[0]["name"], is_guess=False)
+                result["end"] = ReferenceLine(year=value, x=value, label=end_fields[0]["name"], is_guess=False)
 
     if result["start"] is None or result["end"] is None:
         events = storage.get_events_for_entity(entity_id)
@@ -286,16 +328,24 @@ def resolve_timeline_reference(entity_id: str) -> dict:
                 # own year, or a duration event's start_year (never its
                 # end_year, even if start_year itself is missing) — same
                 # "no known fact, so guess from the earliest record" idea
-                # as the cutoff below, just mirrored to the other end.
+                # as the cutoff below, just mirrored to the other end. No
+                # buffer needed here — nothing renders as zero-width by
+                # starting exactly where the chart's own left edge is.
                 first_year = first.get("start_year") if first.get("entity") else first.get("year")
                 if first_year is not None:
-                    result["start"] = ReferenceLine(year=first_year, label="첫 기록", is_guess=True)
+                    result["start"] = ReferenceLine(year=first_year, x=first_year, label="첫 기록", is_guess=True)
             if result["end"] is None:
                 last = events[-1]
                 if last.get("entity"):
-                    cutoff_year = (last.get("start_year") or 0) + _OPEN_DURATION_CUTOFF_BUFFER
+                    cutoff_year = last.get("start_year") or 0
+                    result["cutoff"] = ReferenceLine(
+                        year=cutoff_year, x=cutoff_year + _OPEN_DURATION_CUTOFF_BUFFER,
+                        label="마지막 이벤트", is_guess=True,
+                    )
                 else:
                     cutoff_year = last.get("year")
-                if cutoff_year is not None:
-                    result["cutoff"] = ReferenceLine(year=cutoff_year, label="마지막 이벤트", is_guess=True)
+                    if cutoff_year is not None:
+                        result["cutoff"] = ReferenceLine(
+                            year=cutoff_year, x=cutoff_year, label="마지막 이벤트", is_guess=True,
+                        )
     return result

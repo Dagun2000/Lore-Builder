@@ -261,6 +261,8 @@ _TRANSLATIONS: dict = {
     # --- Visualization: relationship graph ---
     "{0}년에 사건이 {1}개 있습니다. 이동할 사건을 선택하세요:": "{0} has {1} events. Choose which one to go to:",
     "1-hop으로 연결된 엔티티가 없습니다.": "No 1-hop connected entities.",
+    "기준 연도": "Reference year",
+    "선택한 연도 기준으로 존재하는 관계가 없습니다.": "No relationships exist as of the selected year.",
     "**카테고리 필터**": "**Category filter**",
     "최소 연결 횟수": "Minimum connection count",
     "조건에 맞는 연결된 엔티티가 없습니다.": "No connected entities match the current filters.",

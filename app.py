@@ -1444,20 +1444,26 @@ def _render_entity_timeline(entity_id: str) -> None:
 
     fig = go.Figure()
     for e in duration_entries:
+        # `.x` (plot position) caps the bar's geometry; `.year` (the real
+        # fact) is what any text shown to a person should say instead —
+        # for a guessed cutoff these two differ on purpose (see
+        # visualization.ReferenceLine), so the bar can render with visible
+        # width without the hover text claiming a fictional later year.
+        bound_x = open_bound.x if open_bound else e.start_year
         bound_year = open_bound.year if open_bound else e.start_year
-        start = e.start_year if e.start_year is not None else bound_year
+        start = e.start_year if e.start_year is not None else bound_x
         if e.end_year is not None:
             end = e.end_year
             suffix = ""
             color = "#2a78d6"
             span_label = f"{start}~{end}"
         elif ref["end"] is not None:
-            end = max(bound_year, start)
+            end = max(bound_x, start)
             suffix = L(" (대상 소멸로 종료)")
             color = "#2a78d6"
             span_label = f"{start}~{bound_year}" + L(" (대상 소멸로 종료)")
         else:
-            end = max(bound_year, start)
+            end = max(bound_x, start)
             suffix = L(" (진행중)")
             color = "#9ec5f4"
             span_label = f"{start}~" + L(" (마지막 기록: {0}년)").format(bound_year)
@@ -1528,7 +1534,7 @@ def _render_entity_timeline(entity_id: str) -> None:
             # translates the two UI-generated guess labels ("마지막 이벤트",
             # "첫 기록") that actually are.
             fig.add_vline(
-                x=line.year, line_dash=dash, line_color="#898781",
+                x=line.x, line_dash=dash, line_color="#898781",
                 annotation_text=f"{L(line.label)}: {line.year}", annotation_position="top",
                 annotation_textangle=0,
             )
@@ -1577,11 +1583,54 @@ def _render_relationship_graph(entity_id: str) -> None:
 
     category = schema.category_from_id(entity_id)
     center_entity = storage.get_entity(category, entity_id) if category else None
-    weights = visualization.compute_neighbor_weights(entity_id)
+    all_time_weights = visualization.compute_neighbor_weights(entity_id)
 
-    if not weights:
+    if not all_time_weights:
         st.write(L("1-hop으로 연결된 엔티티가 없습니다."))
         return
+
+    # Year slider, bounds from the same start/end (or first/last-record
+    # guess) reference resolution the Timeline tab already uses — every
+    # relationship shown is filtered to what actually exists as of this
+    # year (see visualization._event_active_at), matching the project's
+    # own "no fixed now, everything computed from the timeline" stance
+    # rather than the flat all-time graph this used to render.
+    ref = visualization.resolve_timeline_reference(entity_id)
+    year_min = ref["start"].year
+    year_max = (ref["end"] or ref["cutoff"]).year
+
+    # Both sliders share one row — year on the left, the count filter on
+    # the right — rather than stacking, since they're two independent
+    # filters over the same graph, not a sequence of steps.
+    year_col, count_col = st.columns(2)
+    with year_col:
+        if year_max > year_min:
+            as_of_year = st.slider(
+                L("기준 연도"), min_value=year_min, max_value=year_max, value=year_max,
+                key=f"graph_year_{entity_id}",
+            )
+        else:
+            as_of_year = year_max
+
+    weights = visualization.compute_neighbor_weights(entity_id, as_of_year=as_of_year)
+    if not weights:
+        st.write(L("선택한 연도 기준으로 존재하는 관계가 없습니다."))
+        return
+
+    # st.slider requires min_value < max_value — every neighbor sharing
+    # exactly 1 event (a common case, not just the empty-weights one
+    # already handled above) would otherwise make max_weight == 1 and
+    # crash the widget. A 1~1 range has nothing meaningful to filter
+    # anyway, so just skip the slider and show everyone in that case.
+    max_weight = max(weights.values())
+    with count_col:
+        if max_weight > 1:
+            min_weight = st.slider(
+                L("최소 연결 횟수"), min_value=1, max_value=max_weight, value=1,
+                key=f"graph_minweight_{entity_id}",
+            )
+        else:
+            min_weight = 1
 
     st.write(L("**카테고리 필터**"))
     categories = visualization.filterable_categories()
@@ -1592,20 +1641,6 @@ def _render_relationship_graph(entity_id: str) -> None:
             with col:
                 if st.checkbox(cat, value=True, key=f"graph_cat_{entity_id}_{cat}"):
                     selected_categories.add(cat)
-
-    # st.slider requires min_value < max_value — every neighbor sharing
-    # exactly 1 event (a common case, not just the empty-weights one
-    # already handled above) would otherwise make max_weight == 1 and
-    # crash the widget. A 1~1 range has nothing meaningful to filter
-    # anyway, so just skip the slider and show everyone in that case.
-    max_weight = max(weights.values())
-    if max_weight > 1:
-        min_weight = st.slider(
-            L("최소 연결 횟수"), min_value=1, max_value=max_weight, value=1,
-            key=f"graph_minweight_{entity_id}",
-        )
-    else:
-        min_weight = 1
 
     nodes_data, edges_data = visualization.build_relationship_graph(
         entity_id, weights, selected_categories, min_weight

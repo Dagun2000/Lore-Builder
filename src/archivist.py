@@ -107,12 +107,30 @@ def _register_pointer(pointer_targets: dict, entity_id: str, event_id: str) -> N
         pointer_targets[entity_id].append(event_id)
 
 
+def _short_label(entity_id: str) -> str:
+    """Strip an entity_id's category prefix (char_쟝 -> 쟝) for use inside a
+    generated timeline id — the full event_summary/notes text used to be
+    slugified wholesale instead, which for a rich multi-clause sentence
+    (Creator's drafts especially) produced an id dozens of characters long,
+    cut off mid-word by _slugify's length cap. Participants + year mirrors
+    the same short, meaningful convention _build_duration_diff already uses
+    (entity_predicate_target)."""
+    category = schema.category_from_id(entity_id)
+    if category is None:
+        return entity_id
+    prefix = schema.load_schema_registry()[category]["id_prefix"]
+    return entity_id[len(prefix):] if entity_id.startswith(prefix) else entity_id
+
+
 def _build_point_diff(parsed_input, resolved_entities: dict, record, existing_ids: set, pointer_targets: dict) -> list:
     changes = []
 
-    timeline_id = generate_id("timeline", record.event_summary, existing_ids)
-    existing_ids.add(timeline_id)
     year = parsed_input.years[0]
+    involved = record.involved_entities or list(resolved_entities.values())
+
+    id_seed = "_".join([str(year)] + [_short_label(e) for e in involved[:2]])
+    timeline_id = generate_id("timeline", id_seed, existing_ids)
+    existing_ids.add(timeline_id)
 
     changes.append(
         ChangeItem(
@@ -129,7 +147,6 @@ def _build_point_diff(parsed_input, resolved_entities: dict, record, existing_id
         )
     )
 
-    involved = record.involved_entities or list(resolved_entities.values())
     for entity_id in involved:
         _register_pointer(pointer_targets, entity_id, timeline_id)
 
