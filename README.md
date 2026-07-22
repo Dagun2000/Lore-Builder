@@ -7,7 +7,7 @@
 Lore Builder is a consistency-checking assistant for building out a fictional world's history and cast of characters. Describe an event, a fact, or a relationship in plain language — tag the entities involved in `[brackets]` — and the pipeline checks it against everything already on record before it's saved:
 
 ```
-[Jang] got into a brawl at [the Inn] in 2100.
+[David] got into a brawl at [the Inn] in 2100.
 ```
 
 Outright contradictions (a dead character reappearing, a destroyed item resurfacing, a location's own notes disagreeing with what's being described) are rejected automatically. Anything murkier — a possible world-rule violation, a clash with a character's established traits, a number that doesn't add up against a stated correlation — is surfaced with a plain-language reason and left for you to decide. Nothing is ever saved or rejected silently.
