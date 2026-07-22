@@ -1686,11 +1686,17 @@ def _render_relationship_graph(entity_id: str) -> None:
     edge_weights = [e.weight for e in edges_data]
     min_w, max_w = min(edge_weights), max(edge_weights)
 
+    # vis-network's default node font color is dark, close to unreadable
+    # against Streamlit's dark theme background — force a light one instead.
+    _node_font = {"color": "#f5f5f5"}
     agraph_nodes = [
-        Node(id=entity_id, label=(center_entity or {}).get("name") or entity_id, size=30, color=visualization.CENTER_NODE_COLOR)
+        Node(
+            id=entity_id, label=(center_entity or {}).get("name") or entity_id, size=30,
+            color=visualization.CENTER_NODE_COLOR, font=_node_font,
+        )
     ]
     agraph_nodes += [
-        Node(id=n.entity_id, label=n.label, size=20, color=visualization.category_color(n.category))
+        Node(id=n.entity_id, label=n.label, size=20, color=visualization.category_color(n.category), font=_node_font)
         for n in nodes_data
     ]
     agraph_edges = [
@@ -1811,8 +1817,14 @@ def main() -> None:
         if not deduped:
             st.write(L("플래그된 항목이 없습니다."))
         for flag in deduped:
-            label = flag.reason or L("(사유 없음)")
-            if st.button(f"{flag.entity_id} — {label}", key=f"flagnav_{flag.id}"):
+            # No GUI path ever collects a reason when flagging (add_flag is
+            # always called with just entity_id/flagged_from), so this was
+            # unconditionally showing a "(사유 없음)" placeholder — pure noise
+            # with no way to ever make it say anything else. Only show the
+            # reason when one actually exists (e.g. flags added some other
+            # way with a real reason).
+            label = f"{flag.entity_id} — {flag.reason}" if flag.reason else flag.entity_id
+            if st.button(label, key=f"flagnav_{flag.id}"):
                 _navigate_to_entity(flag.entity_id)
                 st.rerun()
 

@@ -68,6 +68,3 @@ status_effects:
   label: 수감
   type: relational
   notes: 특정 장소에 갇힌 상태. 자유로운 이동이 불가능하다.
-- id: traveled_world_with
-  label: traveled_world_with
-  type: relational

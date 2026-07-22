@@ -236,9 +236,13 @@ def infer_event(resolved_entities: dict, raw_text: str, years: list) -> Inferred
         "참여하지 않는다 — 다만 이 사건은 데이비드와 관련은 있으므로 involved_entities에는 "
         "포함시켜라). '[데이비드]가 [리나]와 놀았다'에서는 데이비드와 리나 모두 true다.\n\n"
         "terminal_entities: 사용 가능한 entity_id 각각에 대해, 이 사건이 그 엔티티의 "
-        "완전하고 돌이킬 수 없는 종료(죽음, 파괴, 해체 등)를 명시적으로 서술하는지(true) "
-        "판단하라. 단순히 다치거나, 위험에 처하거나, 사라졌다(실종)는 정도로는 true가 아니다 "
-        "— 죽음/파괴/해체처럼 명백히 최종적인 서술일 때만 true, 그 외 전부 false.\n\n"
+        "완전하고 돌이킬 수 없는 종료(죽음, 파괴, 해체 등)를 서술하는지(true) 판단하라. "
+        "'죽었다/사망했다' 같은 명시적 단어를 반드시 써야 하는 것은 아니다 — 묘사된 결과가 "
+        "생존/존속 가능성 없이 명백히 치명적/최종적이라면(예: 지뢰를 밟고 폭사했다, 목이 "
+        "잘렸다, 화염에 휩싸여 전소했다) 단어 선택과 무관하게 true로 판단하라. 단, 결과가 "
+        "불확실하거나 단순히 다치거나 위험에 처하거나 사라진(실종) 정도로 그친다면(예: 큰 "
+        "부상을 입었다, 위기에 처했다, 행방불명되었다) true가 아니다 — 서술된 결과 자체가 "
+        "명백히 최종적일 때만 true, 조금이라도 생존/존속 여지가 남아있다면 false.\n\n"
         "genesis_entities: 사용 가능한 entity_id 각각에 대해, 이 사건이 그 엔티티 자신의 "
         "탄생/창단/창조(태어났다, 창단되었다, 만들어졌다 등)를 명시적으로 서술하는지(true) "
         "판단하라. terminal_entities와 정반대 방향의 판단이다 — 그 외 전부 false.\n\n"
@@ -282,7 +286,7 @@ def infer_event(resolved_entities: dict, raw_text: str, years: list) -> Inferred
 
     last_error = None
     for _ in range(2):
-        raw = _invoke_llm(prompt)
+        raw = _invoke_llm(prompt, tier="simple")
         try:
             data = _extract_json(raw)
             if not data.get("is_single_event", True):
@@ -331,17 +335,21 @@ _ATTRIBUTE_FIELD_ROLES = ("lifecycle_start", "lifecycle_end")
 
 def _attribute_candidate_fields(category: str) -> list:
     """Fields eligible for direct auto-fill on a brand-new entity: lifecycle
-    year markers (role lifecycle_start/end, e.g. founded_year, death_year)
-    plus any other *optional* enum field (e.g. character.gender). Required
-    fields are always forced through the normal field-collection flow
-    instead (never silently auto-filled), and reference/text/list fields are
-    excluded — "explicitly stated" is only reliably checkable for a plain
-    year or a closed set of enum options."""
+    year markers (role lifecycle_start/end, e.g. founded_year, death_year),
+    any other *optional* enum field (e.g. character.gender), and any
+    *optional* reference field (e.g. character.race) — a reference field's
+    valid values are whatever entities already exist in its ref_category,
+    which is just as closed a set as an enum's static options list, only
+    fetched from storage instead of the schema (e.g. "인간"/"엘프" for
+    character.race). Required fields are always forced through the normal
+    field-collection flow instead (never silently auto-filled); text/list
+    fields stay excluded — "explicitly stated" isn't reliably checkable
+    against genuinely free-form text."""
     fields = []
     for f in schema.get_fields(category):
         if f.get("role") in _ATTRIBUTE_FIELD_ROLES:
             fields.append(f)
-        elif f["type"] == "enum" and not f.get("required"):
+        elif f["type"] in ("enum", "reference") and not f.get("required"):
             fields.append(f)
     return fields
 
@@ -389,11 +397,29 @@ def infer_new_entity_attributes(category: str, tag: str, context_sentence: str, 
     if not candidate_fields and not has_notes_field:
         return empty_result
 
+    # Reference fields' valid values aren't in the schema (unlike enum's
+    # static options) — they're whatever entities already exist in the
+    # field's ref_category, fetched once here and reused below both for the
+    # prompt's own options list and for validating the LLM's answer.
+    ref_options = {
+        f["name"]: storage.list_entities(f["ref_category"])
+        for f in candidate_fields if f["type"] == "reference"
+    }
+
     if candidate_fields:
         field_lines = []
         for f in candidate_fields:
             if f["type"] == "enum":
                 field_lines.append(f"- {f['name']} (선택지: {', '.join(f.get('options') or [])})")
+            elif f["type"] == "reference":
+                options = ", ".join(
+                    f"{e['id']}({e.get('name') or e['id']})" for e in ref_options[f["name"]]
+                )
+                field_lines.append(
+                    f"- {f['name']} (참조 필드 — 문장에 아래 목록 중 하나와 일치하는(동의어 "
+                    f"포함) 대상이 명시적으로 언급되면 그 entity_id를 그대로 답하라. 목록에 "
+                    f"없는 대상이 언급됐다면 이 필드는 채우지 마라: {options or '(등록된 항목 없음)'})"
+                )
             else:
                 field_lines.append(f"- {f['name']} (연도, 의미: {f.get('role')})")
         field_block = "\n".join(field_lines)
@@ -459,6 +485,13 @@ def infer_new_entity_attributes(category: str, tag: str, context_sentence: str, 
         if field_def["type"] == "enum":
             if value in (field_def.get("options") or []):
                 attributes[name] = value
+        elif field_def["type"] == "reference":
+            # Defense against a hallucinated id, same reasoning as the enum
+            # options check above — only ever accept an id that actually
+            # exists in this field's ref_category.
+            valid_ref_ids = {e["id"] for e in ref_options.get(name, [])}
+            if value in valid_ref_ids:
+                attributes[name] = value
         else:  # lifecycle year field
             try:
                 year_value = int(value)
@@ -470,7 +503,7 @@ def infer_new_entity_attributes(category: str, tag: str, context_sentence: str, 
     consumed = {y for y in (data.get("consumed_years") or []) if y in valid_years}
     for name, value in attributes.items():
         field_def = next(f for f in candidate_fields if f["name"] == name)
-        if field_def["type"] != "enum":
+        if field_def["type"] not in ("enum", "reference"):
             consumed.add(value)
 
     narrative = {y for y in (data.get("narrative_years") or []) if y in consumed}

@@ -998,6 +998,7 @@ def inspect_draft(resolved_entities: dict, draft: NarrativeDraft) -> InspectionR
             reasons = "; ".join(f"[{j.type}] {j.reason}" for j in judgments)
             reason = f"{i + 1}번째 사건(\"{event.notes}\")이 검증에 실패했습니다: {reasons}"
             return InspectionResult(approved=False, reason=reason, failed_event_index=i)
+        print(f"[inspector] {i + 1}번째 사건 검증 통과")
 
         # One combined line for every involved entity, not one line per
         # entity (token-diet pass) — a 2+ entity event used to repeat its
@@ -1050,6 +1051,22 @@ class ReflectionResult:
     last_reason: str | None = None  # set only when approved=False — the final attempt's rejection reason
 
 
+def _print_draft_log(attempt: int, draft: NarrativeDraft) -> None:
+    """A clean, demo-legible summary of one attempt — just the generated
+    story and (via the caller, right after inspect_draft) its rejection
+    reason if any. rag_check's own per-check context/verdict prints are the
+    right level of detail for debugging the checks themselves, but they're
+    noise for watching the reflection loop from the outside: same raw
+    entity context dumped again on every single event of every attempt,
+    with nothing marking where one attempt ends and the retry begins."""
+    print(f"[creator] {attempt}번째 시도")
+    for event in draft.events:
+        if event.event_type == "point":
+            print(f"  [point, {event.year}년] {event.notes}")
+        else:
+            print(f"  [duration] {event.notes}")
+
+
 def run_reflection_loop(
     resolved_entities: dict,
     request_text: str,
@@ -1077,9 +1094,12 @@ def run_reflection_loop(
     draft = first_draft
     start_attempt = 1
     if draft is not None:
+        _print_draft_log(1, draft)
         result = inspect_draft(resolved_entities, draft)
         if result.approved:
+            print(f"[inspector] 1번째 시도 전체 승인 — 저장 대기")
             return ReflectionResult(draft=draft, approved=True, attempts=1)
+        print(f"[creator] 반려 사유: {result.reason}")
         feedback = result.reason
         start_attempt = 2
 
@@ -1093,9 +1113,12 @@ def run_reflection_loop(
             supplement=supplement,
             allowed_new_categories=allowed_new_categories,
         )
+        _print_draft_log(attempt, draft)
         result = inspect_draft(resolved_entities, draft)
         if result.approved:
+            print(f"[inspector] {attempt}번째 시도 전체 승인 — 저장 대기")
             return ReflectionResult(draft=draft, approved=True, attempts=attempt)
+        print(f"[creator] 반려 사유: {result.reason}")
         feedback = result.reason
 
     return ReflectionResult(draft=draft, approved=False, attempts=MAX_RETRIES, last_reason=feedback)

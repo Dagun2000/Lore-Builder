@@ -309,7 +309,17 @@ def _entity_context_lines(
         prefix = f"{annotation} " if annotation else ""
         entity_label = ", ".join(info["entities"])
         line = f"{entity_label}의 관련 기록({eid}): {prefix}{related_event.get('notes') or ''}"
-        if info["range_note"]:
+        # _duration_range_note is a *derived* claim ("현재까지 진행 중"), not
+        # the record's own raw notes text — once closed_predicates says an
+        # earlier event in this same draft already closed it, that derived
+        # "still ongoing" claim is actively wrong (storage just hasn't been
+        # written yet), not merely unconfirmed like the [활성] tag above.
+        # Leaving it in kept re-asserting "현재까지 진행 중" right next to the
+        # draft's own release event, and the LLM sometimes took the bait
+        # anyway even with the confirmatory tag correctly suppressed —
+        # caught via direct user report: a release event at index 0 still
+        # got contradicted by event 4/5 later in the very same draft.
+        if info["range_note"] and not already_closed:
             line += f" {info['range_note']}"
         # Phase 10 patch 22 follow-up 3: the predicate's own registered
         # meaning (status_effects.yaml's notes field), when set, is
@@ -504,7 +514,6 @@ def check_rule_and_notes(
         "\n".join(f"- {line}" for line in context_lines)
         if context_lines else "(참고할 엔티티 정보 없음)"
     )
-    print(f"[rag_check] check_rule_and_notes 컨텍스트:\n{entity_context}")
 
     prompt = (
         "너는 판타지 세계관의 규칙·설정 감사관이다. 새로 입력된 사건 문장에 대해 아래 두 가지를 "
@@ -586,19 +595,13 @@ def check_rule_and_notes(
 
     rule_data = data.get("rule_violation") or {}
     if rule_data.get("violation"):
-        print(f"[rag_check] check_rule_and_notes: 규칙 위반 감지 — {rule_data.get('reason', '')}")
         judgments.append(
             Judgment(type="rule_violation", reason=rule_data.get("reason", ""), confidence=rule_data.get("confidence"))
         )
-    else:
-        print("[rag_check] check_rule_and_notes: 규칙 위반 없음")
 
     notes_data = data.get("notes_conflict") or {}
     if notes_data.get("conflict"):
-        print(f"[rag_check] check_rule_and_notes: 설정 모순 감지 — {notes_data.get('reason', '')}")
         judgments.append(Judgment(type="notes_conflict", reason=notes_data.get("reason", "")))
-    else:
-        print("[rag_check] check_rule_and_notes: 설정 모순 없음")
 
     return judgments
 
